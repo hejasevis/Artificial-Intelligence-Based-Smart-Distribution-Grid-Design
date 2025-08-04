@@ -1,0 +1,14 @@
+streamlit
+streamlit-option-menu
+streamlit-folium
+folium
+pandas
+numpy
+geopy
+openpyxl
+joblib
+scikit-learn
+shapely
+shap
+seaborn
+plotly
