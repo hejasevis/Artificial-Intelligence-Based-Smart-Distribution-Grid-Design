@@ -6,22 +6,36 @@ from streamlit_folium import st_folium
 from streamlit_option_menu import option_menu
 from shapely.geometry import LineString
 from geopy.distance import geodesic
+import json
 
-# --- Opsiyonel projeksiyon ---
+# =============== Optional libs ===============
 try:
     from pyproj import Transformer
     HAS_PYPROJ = True
 except Exception:
     HAS_PYPROJ = False
 
-# ===================== SAYFA =====================
-st.set_page_config(page_title="Yapay Zeka ile Akıllı Dağıtım Şebekesi Tasarımı", layout="wide")
-st.title("🔌 Yapay Zeka ile Akıllı Dağıtım Şebekesi Tasarımı")
+try:
+    from scipy.spatial import cKDTree
+    HAS_KDTREE = True
+except Exception:
+    HAS_KDTREE = False
 
+# ML & Viz
+import plotly.express as px
+from sklearn.ensemble import IsolationForest
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score, mean_squared_error
+
+# ===================== PAGE CONFIG =====================
+st.set_page_config(page_title="Yapay Zeka ile Akıllı Dağıtım Şebekesi Tasarımı", layout="wide")
+st.title("🔌 Yapay Zeka ile Akıllı Dağıtım Şebekesi Tasarımı — v2")
+
+# ===================== MENU =====================
 selected = option_menu(
     menu_title="",
-    options=["Talep Girdisi", "Gerilim Düşümü"],  # ⬅️ üçüncü sekme kaldırıldı
-    icons=["geo-alt-fill", "activity"],
+    options=["Talep Girdisi", "Gerilim Düşümü", "Forecasting", "Arıza/Anomali"],
+    icons=["geo-alt-fill", "activity", "graph-up-arrow", "exclamation-triangle-fill"],
     menu_icon="cast",
     default_index=0,
     styles={
@@ -32,7 +46,7 @@ selected = option_menu(
     }
 )
 
-# ===================== YARDIMCI =====================
+# ===================== HELPERS =====================
 def get_transformers():
     if not HAS_PYPROJ:
         raise RuntimeError("pyproj mevcut değil")
@@ -40,120 +54,246 @@ def get_transformers():
     bwd = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
     return fwd, bwd
 
-def interpolate_point_along_route(route_line_xy, bwd, distance_m):
-    distance_m = max(0.0, min(distance_m, route_line_xy.length))
-    p = route_line_xy.interpolate(distance_m)
-    x, y = p.x, p.y
-    lon, lat = bwd.transform(x, y)
-    return float(lat), float(lon), (x, y)
-
-def pick_nearest_existing_pole_xy(poles_xy, target_xy):
-    if not poles_xy:
-        return None, None
-    tx, ty = target_xy
-    best = None
-    best_d2 = None
-    for (x, y) in poles_xy:
-        d2 = (x - tx) ** 2 + (y - ty) ** 2
-        if best_d2 is None or d2 < best_d2:
-            best_d2 = d2
-            best = (x, y)
-    return best, best_d2
-
-def suggest_kva_from_kw(load_kw):
-    target = load_kw * 1.25
-    for step in [250, 400, 630, 800, 1000, 1250, 1600, 2000, 2500, 3150]:
-        if step >= target:
-            return step
-    return 3150
-
-def next_two_positions(total_len_m, Lmax):
-    """Analitik: hattı Lmax'a göre böl. 0->yok, 1->tek, 2->iki ara trafo."""
-    if total_len_m <= Lmax:
-        return []
-    if total_len_m <= 2 * Lmax:
-        return [min(Lmax, total_len_m - Lmax)]
-    return [Lmax, total_len_m - Lmax]
-
-# ===================== ML (opsiyonel, sentetik) =====================
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-
-@st.cache_resource
-def train_simple_models(n=3000, k_drop=0.0001, thr_pct=5.0):
-    rng = np.random.default_rng(0)
-    total_len = rng.uniform(50, 2000, n)
-    load_kw = rng.uniform(10, 300, n)
-    kva = rng.choice([250, 400, 630, 800, 1000], n)
-    thr = thr_pct / 100.0
-    Lmax = thr / (k_drop * load_kw)
-    need_two = (total_len > 2 * Lmax).astype(int)
-    pos = np.clip(Lmax, 0, total_len - Lmax)
-    X = np.c_[total_len, load_kw, kva]
-    cls = RandomForestClassifier(n_estimators=120, random_state=42).fit(X, need_two)
-    reg = RandomForestRegressor(n_estimators=160, random_state=42).fit(X, pos)
-    return cls, reg
-
-# ===================== VERİ =====================
 @st.cache_data
-def load_data():
-    direk_df = pd.read_excel("Direk Sorgu Sonuçları.xlsx")
-    trafo_df = pd.read_excel("Trafo Sorgu Sonuçları.xlsx")
-    return direk_df, trafo_df
+def norm_cols(df: pd.DataFrame) -> pd.DataFrame:
+    d = df.copy()
+    d.columns = [str(c).strip() for c in d.columns]
+    return d
 
-direk_df, trafo_df = load_data()
+@st.cache_data
+def load_default_data():
+    """Try to read user files from working dir. Falls back to uploaders if not found."""
+    direk_df = None
+    trafo_df = None
+    ext_df = None
+    try:
+        direk_df = pd.read_excel("Direk Sorgu Sonuçları.xlsx")
+        direk_df = norm_cols(direk_df)
+    except Exception:
+        pass
+    try:
+        trafo_df = pd.read_excel("Trafo Sorgu Sonuçları.xlsx")
+        trafo_df = norm_cols(trafo_df)
+    except Exception:
+        pass
+    try:
+        ext_df = pd.read_csv("smart_grid_dataset.csv")
+        ext_df = norm_cols(ext_df)
+    except Exception:
+        pass
+    return direk_df, trafo_df, ext_df
 
-# ===================== TALEP GİRDİSİ =====================
+# Electrical model (approx 3-phase)
+def vdrop_percent(P_kw, L_m, Vn_kV=0.4, cosphi=0.9, R_ohm_km=0.642, X_ohm_km=0.083):
+    try:
+        L_km = float(L_m) / 1000.0
+        V = float(Vn_kV) * 1e3
+        P = float(P_kw) * 1e3
+        I = P / (np.sqrt(3) * V * float(cosphi))
+        # sinφ from cosφ
+        sinphi = np.sqrt(max(0.0, 1.0 - float(cosphi) ** 2))
+        Z_proj = float(R_ohm_km) * L_km * float(cosphi) + float(X_ohm_km) * L_km * sinphi
+        dV = 100.0 * (np.sqrt(3) * I * Z_proj) / V
+        return float(dV)
+    except Exception:
+        return np.nan
+
+# Build KDTree for snapping
+@st.cache_data
+def build_kdtree(points_xy):
+    if not HAS_KDTREE:
+        return None
+    arr = np.array(points_xy)
+    if len(arr) == 0:
+        return None
+    return cKDTree(arr)
+
+# Route builder: interpolate points along straight line and snap to nearest poles
+
+def dedup_seq(seq):
+    out = []
+    for p in seq:
+        if not out or (p[0] != out[-1][0] or p[1] != out[-1][1]):
+            out.append(p)
+    return out
+
+
+def build_route_and_stats(demand_latlon, trafo_latlon, poles_latlon, max_span=40.0, snap_radius=30.0):
+    """Returns: route_latlon, total_len_m, used_count, proposed_count, spans_m"""
+    try:
+        fwd, bwd = get_transformers()
+        to_xy = lambda lon, lat: fwd.transform(lon, lat)
+        to_lonlat = lambda x, y: bwd.transform(x, y)
+
+        demand_xy = to_xy(demand_latlon[1], demand_latlon[0])
+        trafo_xy = to_xy(trafo_latlon[1], trafo_latlon[0])
+        line_xy = LineString([demand_xy, trafo_xy])
+
+        poles_xy = [to_xy(lon, lat) for (lat, lon) in poles_latlon]
+        tree = build_kdtree(poles_xy)
+
+        length = line_xy.length
+        distances = list(np.arange(0, length, float(max_span))) + [length]
+        pts = [line_xy.interpolate(d) for d in distances]
+
+        used_idx = set()
+        route_xy = []
+        for p in pts:
+            px, py = p.x, p.y
+            snapped = False
+            if tree is not None:
+                dist, idx = tree.query([px, py], k=1)
+                if dist <= float(snap_radius):
+                    route_xy.append(tuple(poles_xy[idx])); used_idx.add(int(idx)); snapped = True
+            if not snapped:
+                route_xy.append((px, py))
+
+        if route_xy:
+            route_xy[0] = demand_xy
+            route_xy[-1] = trafo_xy
+
+        route_xy = dedup_seq(route_xy)
+        spans = [LineString(route_xy[i:i+2]).length for i in range(len(route_xy)-1)]
+        total_len_m = sum(spans)
+        used_count = len(used_idx)
+        proposed_count = max(0, len(route_xy) - used_count - 2)
+
+        final_path = [(to_lonlat(x, y)[1], to_lonlat(x, y)[0]) for (x, y) in route_xy]
+        return final_path, total_len_m, used_count, proposed_count, spans
+
+    except Exception:
+        # fallback geodesic straight line
+        total_len_m = geodesic(demand_latlon, trafo_latlon).meters
+        final_path = [demand_latlon, trafo_latlon]
+        return final_path, total_len_m, 0, 1, [total_len_m]
+
+# ===================== DATA =====================
+# GitHub yükleme desteği
+import io, requests
+
+@st.cache_data(show_spinner=False, ttl=600)
+def fetch_github_file(raw_url: str, headers: dict | None = None) -> bytes:
+    if not raw_url:
+        raise ValueError("raw_url boş")
+    headers = headers or {}
+    r = requests.get(raw_url, headers=headers, timeout=20)
+    r.raise_for_status()
+    return r.content
+
+@st.cache_data
+def load_from_github(direk_url: str | None, trafo_url: str | None, ext_url: str | None, token: str | None = None):
+    headers = {"Authorization": f"token {token}"} if token else None
+    direk_df = trafo_df = ext_df = None
+    try:
+        if direk_url:
+            raw = fetch_github_file(direk_url, headers)
+            direk_df = pd.read_excel(io.BytesIO(raw))
+            direk_df = norm_cols(direk_df)
+    except Exception as e:
+        st.warning(f"Direk GitHub yüklemesi başarısız: {e}")
+    try:
+        if trafo_url:
+            raw = fetch_github_file(trafo_url, headers)
+            trafo_df = pd.read_excel(io.BytesIO(raw))
+            trafo_df = norm_cols(trafo_df)
+    except Exception as e:
+        st.warning(f"Trafo GitHub yüklemesi başarısız: {e}")
+    try:
+        if ext_url:
+            raw = fetch_github_file(ext_url, headers)
+            # CSV/Parquet autodetect by extension
+            if ext_url.lower().endswith('.parquet'):
+                import pyarrow as pa, pyarrow.parquet as pq  # noqa: F401
+                ext_df = pd.read_parquet(io.BytesIO(raw))
+            else:
+                ext_df = pd.read_csv(io.BytesIO(raw))
+            ext_df = norm_cols(ext_df)
+    except Exception as e:
+        st.warning(f"Ek veri GitHub yüklemesi başarısız: {e}")
+    return direk_df, trafo_df, ext_df
+
+
+direk_df, trafo_df, ext_df = load_default_data()
+
+with st.sidebar.expander("📂 Veri Kaynakları"):
+    st.write("Varsayılan: çalışma dizinindeki dosyalar. Alternatif olarak **GitHub raw URL** girin veya dosya yükleyin.")
+
+    # GitHub Inputs
+    st.markdown("**GitHub Raw URL'leri**")
+    gh_direk = st.text_input("Direk (XLSX) Raw URL", placeholder="https://raw.githubusercontent.com/<user>/<repo>/<branch>/path/Direk.xlsx")
+    gh_trafo = st.text_input("Trafo (XLSX) Raw URL", placeholder="https://raw.githubusercontent.com/<user>/<repo>/<branch>/path/Trafo.xlsx")
+    gh_ext = st.text_input("Kaggle/Ek (CSV/Parquet) Raw URL", placeholder="https://raw.githubusercontent.com/<user>/<repo>/<branch>/path/data.csv")
+    gh_token = st.secrets.get("GITHUB_TOKEN", None) if hasattr(st, 'secrets') else None
+    colb1, colb2 = st.columns([1,1])
+    with colb1:
+        use_github = st.checkbox("GitHub'dan yükle", value=False)
+    with colb2:
+        if st.button("🔄 GitHub verisini çek"):
+            st.cache_data.clear()
+
+    # File uploaders
+    up_direk = st.file_uploader("veya Direk verisi (XLSX) yükle", type=["xlsx"], key="upl_direk")
+    up_trafo = st.file_uploader("veya Trafo verisi (XLSX) yükle", type=["xlsx"], key="upl_trafo")
+    up_ext = st.file_uploader("veya Kaggle/ek veri (CSV/Parquet)", type=["csv","parquet"], key="upl_ext")
+
+    if use_github and (gh_direk or gh_trafo or gh_ext):
+        g_direk, g_trafo, g_ext = load_from_github(gh_direk or None, gh_trafo or None, gh_ext or None, gh_token)
+        direk_df = g_direk or direk_df
+        trafo_df = g_trafo or trafo_df
+        ext_df = g_ext or ext_df
+
+    if up_direk is not None:
+        direk_df = norm_cols(pd.read_excel(up_direk))
+    if up_trafo is not None:
+        trafo_df = norm_cols(pd.read_excel(up_trafo))
+    if up_ext is not None:
+        if up_ext.name.lower().endswith('.parquet'):
+            ext_df = pd.read_parquet(up_ext)
+        else:
+            ext_df = norm_cols(pd.read_csv(up_ext))
+
+# ===================== PAGE 1: Talep Girdisi =====================
 if selected == "Talep Girdisi":
-    direk_clean = (
-        direk_df[["AssetID", "Direk Kodu", "Enlem", "Boylam"]]
-        .dropna(subset=["Enlem", "Boylam"]).copy()
-    )
-    direk_clean["Direk Kodu"] = direk_clean["Direk Kodu"].fillna("Bilinmiyor")
+    if (direk_clean is None) or (trafo_clean is None):
+        st.error("Direk ve trafo verileri olmadan bu sayfa çalışmaz. Sol menüden dosyaları yükleyin.")
+        st.stop()
 
-    trafo_clean = (
-        trafo_df[["AssetID", "Montaj Yeri", "Gücü[kVA]", "Enlem", "Boylam"]]
-        .dropna(subset=["Enlem", "Boylam"]).copy()
-    )
-
-    # --- Sidebar ---
     st.sidebar.header("⚙️ Hat Parametreleri")
-    max_span = st.sidebar.number_input("Maks. direk aralığı (m)", 20, 100, 40, 5)
-    snap_radius = st.sidebar.number_input("Mevcut direğe snap yarıçapı (m)", 10, 60, 30, 5)
+    max_span = st.sidebar.number_input("Maks. direk aralığı (m)", 20, 120, 40, 5)
+    snap_radius = st.sidebar.number_input("Mevcut direğe snap yarıçapı (m)", 5, 120, 30, 5)
 
-    with st.sidebar.expander("🔧 Gelişmiş (Trafo Önerisi)"):
+    with st.sidebar.expander("🔌 Elektrik Parametreleri"):
+        Vn_kV = st.number_input("Nominal gerilim (kV)", 0.4, 34.5, 0.4, 0.1)
+        pf = st.number_input("Güç faktörü (pf)", 0.5, 1.0, 0.9, 0.05)
+        R_ohm_km = st.number_input("R (Ω/km)", 0.05, 1.5, 0.642, 0.01)
+        X_ohm_km = st.number_input("X (Ω/km)", 0.01, 1.0, 0.083, 0.01)
         drop_threshold_pct = st.number_input("Gerilim düşümü eşiği (%)", 1.0, 15.0, 5.0, 0.5)
-        snap_tr_radius = st.number_input("Trafo/direk snap yarıçapı (m)", 10, 120, 50, 5)
-        pf = st.number_input("Güç faktörü (pf)", 0.5, 1.0, 0.8, 0.05)
-        use_ml = st.checkbox("Öneri için ML kullan (deneysel)", True)
-        draw_new_poles = st.checkbox("Ara (mor) direkleri çiz", True)
-        if st.button("🧹 Önbelleği Temizle ve Yeniden Çalıştır"):
-            st.cache_data.clear(); st.cache_resource.clear(); st.rerun()
 
-    # --- Harita: talep seçimi ---
+    # --- Map for demand selection ---
     st.subheader("📍 Talep Noktasını Seçin (Harita)")
-    center_lat = float(direk_clean["Enlem"].mean())
-    center_lon = float(direk_clean["Boylam"].mean())
+    center_lat = float(direk_clean['lat'].mean())
+    center_lon = float(direk_clean['lon'].mean())
     m = folium.Map(location=[center_lat, center_lon], zoom_start=16, control_scale=True)
 
     poles_group = folium.FeatureGroup(name="Direkler (Mevcut)", show=True)
-    trafos_group = folium.FeatureGroup(name="Trafos", show=True)
+    trafos_group = folium.FeatureGroup(name="Trafolar", show=True)
 
     for _, r in direk_clean.iterrows():
-        folium.CircleMarker([r["Enlem"], r["Boylam"]], radius=4, color="blue",
+        folium.CircleMarker([r['lat'], r['lon']], radius=4, color="blue",
                             fill=True, fill_opacity=0.7,
-                            tooltip=f"Direk: {r['Direk Kodu']}",
-                            popup=f"AssetID: {r['AssetID']}").add_to(poles_group)
+                            tooltip=f"Direk: {r.get('pole_code','-')}",
+                            popup=f"AssetID: {r.get('asset_id','-')}").add_to(poles_group)
 
     for _, r in trafo_clean.iterrows():
-        folium.Marker([r["Enlem"], r["Boylam"]],
-                      tooltip=f"Trafo: {r['Montaj Yeri']}",
-                      popup=f"Güç: {r['Gücü[kVA]']} kVA\nAssetID: {r['AssetID']}",
+        folium.Marker([r['lat'], r['lon']],
+                      tooltip=f"Trafo: {r.get('name','-')}",
+                      popup=f"Güç: {r.get('kva','?')} kVA\nAssetID: {r.get('asset_id','-')}",
                       icon=folium.Icon(color="orange", icon="bolt", prefix="fa")).add_to(trafos_group)
 
     poles_group.add_to(m); trafos_group.add_to(m)
     folium.LayerControl(collapsed=False).add_to(m)
     m.add_child(folium.LatLngPopup())
-    map_data = st_folium(m, height=650, width="100%", returned_objects=["last_clicked"], key="select_map")
+    map_data = st_folium(m, height=600, width="100%", returned_objects=["last_clicked"], key="select_map_v2")
 
     if "demand_point" not in st.session_state:
         st.session_state["demand_point"] = None
@@ -165,282 +305,214 @@ if selected == "Talep Girdisi":
     if st.session_state["demand_point"] is None:
         st.info("📍 Haritadan bir noktaya tıkla."); st.stop()
 
-    # --- Talep seçildi ---
     new_lat, new_lon = st.session_state["demand_point"]
     st.success(f"Yeni talep noktası: ({new_lat:.6f}, {new_lon:.6f})")
 
     st.subheader("⚡ Talep Edilen Yük (kW)")
-    user_kw = st.slider("Talep edilen güç", 1, 300, 100, 5, key="kw_slider")
-    k_drop = 0.0001
+    user_kw = st.slider("Talep edilen güç", 1, 500, 120, 5, key="kw_slider_v2")
 
-    # En yakın trafoyu bul, kapasite ve gerilim düşümü kontrolü
-    def distance_to_demand(row):
-        return geodesic((new_lat, new_lon), (row["Enlem"], row["Boylam"])) .meters
+    # --- Choose best trafo by route-based ΔV (top-5 evaluated) ---
+    def eval_trafo(row):
+        t_latlon = (float(row['lat']), float(row['lon']))
+        poles_latlon = list(zip(direk_clean['lat'].astype(float), direk_clean['lon'].astype(float)))
+        route, Lm, used, prop, spans = build_route_and_stats((new_lat,new_lon), t_latlon, poles_latlon,
+                                                             max_span=max_span, snap_radius=snap_radius)
+        dv = vdrop_percent(user_kw, Lm, Vn_kV, pf, R_ohm_km, X_ohm_km)
+        cap_ok = False
+        try:
+            kva = float(row.get('kva', np.nan))
+            cap_ok = (kva * pf) >= user_kw
+        except Exception:
+            pass
+        return {
+            'name': row.get('name','-'), 'kva': row.get('kva', None), 'lat': t_latlon[0], 'lon': t_latlon[1],
+            'route': route, 'L_m': Lm, 'dv_pct': dv, 'cap_ok': cap_ok, 'used_cnt': used, 'new_cnt': prop
+        }
 
+    # Evaluate top-N nearest by geodesic first for speed
     trafo_local = trafo_clean.copy()
-    trafo_local["Mesafe (m)"] = trafo_local.apply(distance_to_demand, axis=1)
-    trafo_local["Gerilim Düşümü (%)"] = k_drop * trafo_local["Mesafe (m)"] * user_kw
-    sorted_trafo = trafo_local.sort_values(by="Mesafe (m)").reset_index(drop=True)
-    recommended = sorted_trafo.iloc[0]
+    trafo_local['geo_dist'] = trafo_local.apply(lambda r: geodesic((new_lat,new_lon),(float(r['lat']),float(r['lon']))).meters, axis=1)
+    topN = trafo_local.sort_values('geo_dist').head(8)
+    evals = [eval_trafo(r) for _, r in topN.iterrows()]
+    cand_df = pd.DataFrame(evals).sort_values(by=['cap_ok','dv_pct','new_cnt','L_m'], ascending=[False, True, True, True])
 
-    # Kapasite
-    try:
-        trafo_power_kva = float(recommended["Gücü[kVA]"])
-    except Exception:
-        trafo_power_kva = None
+    with st.expander("📈 En Uygun Trafo Adayları (rota ve ΔV ile)"):
+        st.dataframe(cand_df[['name','kva','L_m','dv_pct','cap_ok','new_cnt']].rename(columns={
+            'name':'Montaj Yeri','kva':'Gücü[kVA]','L_m':'Rota (m)','dv_pct':'ΔV (%)','cap_ok':'Kapasite Uygun','new_cnt':'Yeni Direk'
+        }), use_container_width=True)
 
-    if trafo_power_kva is not None:
-        trafo_capacity_kw = trafo_power_kva * 0.8  # pf varsayılan 0.8; aşağıda kullanıcı pf ile tekrar hesaplanır
-        if user_kw > trafo_capacity_kw:
-            st.error(
-                f"Talep {user_kw:.0f} kW, seçilen mevcut trafo kapasitesini aşıyor "
-                f"({trafo_power_kva:.0f} kVA × pf=0.80 ≈ {trafo_capacity_kw:.0f} kW). "
-                "Ek/yenileme trafo gerekir."
-            )
+    best = cand_df.iloc[0]
 
-    with st.expander("📈 En Uygun 5 Trafo"):
-        st.dataframe(
-            sorted_trafo[["Montaj Yeri", "Gücü[kVA]", "Mesafe (m)", "Gerilim Düşümü (%)"]].head(5),
-            use_container_width=True,
-        )
-
-    # --- Hat güzergâhı ---
+    # --- Draw result map ---
     m2 = folium.Map(location=[new_lat, new_lon], zoom_start=16, control_scale=True)
+
+    # Existing poles (blue)
     for _, r in direk_clean.iterrows():
-        folium.CircleMarker([r["Enlem"], r["Boylam"]], radius=4, color="blue",
+        folium.CircleMarker([r['lat'], r['lon']], radius=4, color="blue",
                             fill=True, fill_opacity=0.7,
-                            tooltip=f"Direk: {r['Direk Kodu']}",
-                            popup=f"AssetID: {r['AssetID']}").add_to(m2)
-    for _, r in trafo_local.iterrows():
-        folium.Marker([r["Enlem"], r["Boylam"]],
-                      tooltip=f"Trafo: {r['Montaj Yeri']}",
-                      popup=f"Güç: {r['Gücü[kVA]']} kVA\nAssetID: {r['AssetID']}",
+                            tooltip=f"Direk: {r.get('pole_code','-')}").add_to(m2)
+
+    # Trafo markers (orange)
+    for _, r in trafo_clean.iterrows():
+        folium.Marker([r['lat'], r['lon']],
+                      tooltip=f"Trafo: {r.get('name','-')}",
                       icon=folium.Icon(color="orange", icon="bolt", prefix="fa")).add_to(m2)
 
-    try:
-        fwd, bwd = get_transformers()
-        to_xy = lambda lon, lat: fwd.transform(lon, lat)
-        to_lonlat = lambda x, y: bwd.transform(x, y)
-
-        demand_xy = to_xy(new_lon, new_lat)
-        trafo_xy = to_xy(float(recommended["Boylam"]), float(recommended["Enlem"]))
-        line_xy = LineString([demand_xy, trafo_xy])
-
-        poles_xy = [to_xy(lon, lat) for lon, lat in zip(direk_clean["Boylam"], direk_clean["Enlem"]) ]
-
-        length = line_xy.length
-        distances = list(np.arange(0, length, float(max_span))) + [length]
-        pts = [line_xy.interpolate(d) for d in distances]
-
-        route_xy, used_idx = [], set()
-        for p in pts:
-            px, py = p.x, p.y
-            best_i, best_d2 = None, None
-            for i, (x, y) in enumerate(poles_xy):
-                d2 = (x - px) ** 2 + (y - py) ** 2
-                if best_d2 is None or d2 < best_d2:
-                    best_d2, best_i = d2, i
-            if best_i is not None and (best_d2 ** 0.5) <= float(snap_radius):
-                route_xy.append(poles_xy[best_i]); used_idx.add(best_i)
-            else:
-                route_xy.append((px, py))
-
-        if route_xy:
-            route_xy[0] = demand_xy
-            route_xy[-1] = trafo_xy
-
-        final_path = [(to_lonlat(x, y)[1], to_lonlat(x, y)[0]) for (x, y) in route_xy]
-
-        route_line_xy = LineString(route_xy)
-        total_len_m = route_line_xy.length
-        spans = [LineString(route_xy[i:i + 2]).length for i in range(len(route_xy) - 1)]
-        avg_span = float(np.mean(spans)) if spans else 0.0
-        used_count = len(used_idx)
-        proposed_count = max(0, len(route_xy) - used_count - 2)
-
-        if draw_new_poles:
-            used_xy_set = set(poles_xy[i] for i in used_idx)
-            for (x, y), (lat, lon) in zip(route_xy, final_path):
-                if (x, y) not in used_xy_set:
-                    folium.CircleMarker((lat, lon), radius=5, color="purple",
-                                        fill=True, fill_opacity=0.9,
-                                        tooltip="Önerilen Yeni Direk").add_to(m2)
-
-    except Exception:
-        final_path = [(new_lat, new_lon),
-                      (float(recommended["Enlem"]), float(recommended["Boylam"]))]
-        total_len_m = geodesic((new_lat, new_lon),
-                               (float(recommended["Enlem"]), float(recommended["Boylam"])) ).meters
-        avg_span = total_len_m
-        used_count = 0
-        proposed_count = 1
-        route_line_xy = None
-        poles_xy = []
-
+    # Demand & chosen trafo
     folium.Marker((new_lat, new_lon), icon=folium.Icon(color="red"), tooltip="Talep Noktası").add_to(m2)
-    folium.Marker((float(recommended["Enlem"]), float(recommended["Boylam"])),
-                  icon=folium.Icon(color="orange", icon="bolt", prefix="fa"),
-                  tooltip="Seçilen Mevcut Trafo").add_to(m2)
+    folium.Marker((best['lat'], best['lon']), icon=folium.Icon(color="orange", icon="bolt", prefix="fa"), tooltip="Seçilen Trafo").add_to(m2)
 
-    if len(final_path) >= 2:
-        folium.PolyLine(final_path, color="green", weight=4, opacity=0.9,
-                        tooltip=f"Hat uzunluğu ≈ {total_len_m:.1f} m").add_to(m2)
+    # Route polyline
+    if len(best['route']) >= 2:
+        # Identify snapped vs new points for coloring
+        try:
+            fwd, bwd = get_transformers()
+            to_xy = lambda lon, lat: fwd.transform(lon, lat)
+            poles_xy = [to_xy(lon, lat) for (lat, lon) in zip(direk_clean['lat'], direk_clean['lon'])]
+            snapped_set = set(poles_xy)
+            # rebuild XY for route
+            route_xy = [to_xy(lon, lat) for (lat, lon) in best['route']]
+            for (lat, lon), (x,y) in zip(best['route'], route_xy):
+                if (x,y) in snapped_set:
+                    folium.CircleMarker((lat, lon), radius=5, color="blue", fill=True, fill_opacity=0.9, tooltip="Mevcut Direk (rota)").add_to(m2)
+                else:
+                    folium.CircleMarker((lat, lon), radius=5, color="purple", fill=True, fill_opacity=0.9, tooltip="Önerilen Yeni Direk").add_to(m2)
+        except Exception:
+            pass
+
+        folium.PolyLine(best['route'], color="green", weight=4, opacity=0.9,
+                        tooltip=f"Hat uzunluğu ≈ {best['L_m']:.1f} m").add_to(m2)
     else:
         st.warning("Hat noktaları üretilemedi.")
 
     st.subheader("🧾 Hat Özeti")
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Toplam Uzunluk", f"{total_len_m:.1f} m")
-    c2.metric("Kullanılan Mevcut Direk", f"{used_count}")
-    c3.metric("Önerilen Yeni Direk", f"{proposed_count}")
+    c1.metric("Toplam Uzunluk", f"{best['L_m']:.1f} m")
+    c2.metric("Kullanılan Mevcut Direk", f"{int(best['used_cnt'])}")
+    c3.metric("Önerilen Yeni Direk", f"{int(best['new_cnt'])}")
+    avg_span = (np.mean(best['L_m']/max(1,len(best['route'])-1)) if best['L_m']>0 else 0)
     c4.metric("Ortalama Direk Aralığı", f"{avg_span:.1f} m")
 
-    if recommended["Gerilim Düşümü (%)"] > 5.0:
-        st.error(f"⚠️ Gerilim düşümü %{recommended['Gerilim Düşümü (%)']:.2f} — yeni trafo gerekebilir.")
+    if best['dv_pct'] > drop_threshold_pct:
+        st.error(f"⚠️ Gerilim düşümü %{best['dv_pct']:.2f} — eşik %{drop_threshold_pct:.1f} üstü.")
     else:
-        st.success(f"✅ En uygun trafo: {recommended['Montaj Yeri']}, %{recommended['Gerilim Düşümü (%)']:.2f} gerilim düşümü")
-
-    # === Yeni trafo önerisi: SADECE mevcut trafo > 400 kVA ise ===
-    if (trafo_power_kva is not None) and (trafo_power_kva > 400) and (route_line_xy is not None):
-        Lmax = (drop_threshold_pct / 100.0) / (k_drop * float(user_kw))
-        pos_list = next_two_positions(total_len_m, Lmax)
-
-        if use_ml:
-            try:
-                cls, reg = train_simple_models(k_drop=k_drop, thr_pct=drop_threshold_pct)
-                X_now = np.array([[total_len_m, float(user_kw), trafo_power_kva]])
-                need_two_ml = bool(cls.predict(X_now)[0])
-                if not need_two_ml:
-                    dpos_ml = float(reg.predict(X_now)[0])
-                    if len(pos_list) == 1:
-                        pos_list = [0.5 * (pos_list[0] + dpos_ml)]
-                    elif len(pos_list) == 0:
-                        pos_list = [dpos_ml]
-                else:
-                    if len(pos_list) < 2:
-                        pos_list = [min(Lmax, total_len_m / 2), max(total_len_m - Lmax, total_len_m / 2)]
-            except Exception:
-                st.info("ML destekli öneri çalışmadı; analitik sonuç kullanılıyor.")
-
-        if len(pos_list) == 0:
-            st.info(f"Bu hat tek parçada %{drop_threshold_pct:.1f} eşiğin altında; yeni trafoya gerek yok.")
-        else:
-            try:
-                fwd, bwd = get_transformers()
-                _ = poles_xy
-            except Exception:
-                fwd, bwd = None, None
-
-            suggestions = []
-            for dpos in pos_list:
-                if fwd and bwd and route_line_xy is not None:
-                    lat, lon, (tx, ty) = interpolate_point_along_route(route_line_xy, bwd, dpos)
-                    nearest_xy, d2 = pick_nearest_existing_pole_xy(poles_xy, (tx, ty))
-                    snapped = False
-                    if nearest_xy is not None and (d2 ** 0.5) <= float(snap_tr_radius):
-                        nx, ny = nearest_xy
-                        nlon, nlat = bwd.transform(nx, ny)
-                        lat, lon = float(nlat), float(nlon)
-                        snapped = True
-                else:
-                    lat, lon, snapped = np.nan, np.nan, False
-
-                suggestions.append({
-                    "Sıra": len(suggestions) + 1,
-                    "Hat Boyunca Konum (m)": round(float(dpos), 1),
-                    "Lat": round(float(lat), 6) if pd.notna(lat) else None,
-                    "Lon": round(float(lon), 6) if pd.notna(lon) else None,
-                    "Konum Türü": "Mevcut direğe snap" if snapped else "Yeni konum",
-                    "Tahmini kVA": suggest_kva_from_kw(float(user_kw)),
-                })
-
-            capacity_note = ""
-            if trafo_power_kva is not None:
-                cap_kw = trafo_power_kva * pf
-                if user_kw > cap_kw:
-                    capacity_note = " (mevcut trafo kapasitesi AŞILIYOR)"
-
-            st.subheader("🔋 Önerilen Yeni Trafolar)")
-            df_sug = pd.DataFrame(
-                suggestions,
-                columns=["Sıra", "Hat Boyunca Konum (m)", "Lat", "Lon", "Konum Türü", "Tahmini kVA"],
-            )
-            st.dataframe(df_sug, use_container_width=True)
-
-            if len(pos_list) == 1:
-                st.warning(
-                    f"Mevcut trafo {trafo_power_kva:.0f} kVA{capacity_note}."
-                    f"%{drop_threshold_pct:.1f} eşiği için **1 yeni trafo** önerildi."
-                )
-            else:
-                st.error(
-                    f"Mevcut trafo {trafo_power_kva:.0f} kVA{capacity_note}. Hat uzun (≈ {total_len_m:.1f} m). "
-                    f"%{drop_threshold_pct:.1f} eşiği için **2 yeni trafo** önerildi."
-                )
-    else:
-        st.info("Yeni trafo öneri tablosu yalnızca **mevcut trafo gücü > 400 kVA** olduğunda üretilir.")
+        st.success(f"✅ ΔV %{best['dv_pct']:.2f} ≤ %{drop_threshold_pct:.1f}")
 
     st.subheader("📡 Oluşturulan Şebeke Hattı")
-    st_folium(m2, height=650, width="100%", key="result_map")
+    st_folium(m2, height=620, width="100%", key="result_map_v2")
 
-# ===================== GERİLİM DÜŞÜMÜ =====================
-elif selected == "Gerilim Düşümü":
-    st.subheader("📉 Gerilim Düşümü Tahmini (Yapay Zeka)")
-    from sklearn.ensemble import RandomForestRegressor
-    from sklearn.model_selection import train_test_split
-    from sklearn.metrics import r2_score, mean_squared_error
-    import plotly.express as px
-
-    direk_clean = direk_df.dropna(subset=["Enlem", "Boylam"]).copy()
-    trafo_names = trafo_df["Montaj Yeri"].dropna().unique()
-    if len(trafo_names) == 0:
-        st.error("Trafo verisi bulunamadı."); st.stop()
-
-    trafo_sec = st.selectbox("🔌 Trafo Seçin", options=trafo_names)
-    trafo_row = trafo_df[trafo_df["Montaj Yeri"] == trafo_sec].iloc[0]
-    trafo_coord = (float(trafo_row["Enlem"]), float(trafo_row["Boylam"]))
-    trafo_power = float(trafo_row["Gücü[kVA]"])
-
-    direk_clean["Mesafe (m)"] = direk_clean.apply(
-        lambda r: geodesic((r["Enlem"], r["Boylam"]), trafo_coord).meters, axis=1
-    )
-    rng = np.random.default_rng(42)
-    direk_clean["Yük (kW)"] = rng.integers(10, 300, size=len(direk_clean))
-    direk_clean["Trafo_Gucu (kVA)"] = trafo_power
-
-    k = 0.0001
-    direk_clean["Gerilim Düşümü (%)"] = k * direk_clean["Mesafe (m)"] * direk_clean["Yük (kW)"]
-
-    X = direk_clean[["Mesafe (m)", "Yük (kW)", "Trafo_Gucu (kVA)"]]
-    y = direk_clean["Gerilim Düşümü (%)"]
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-
-    model = RandomForestRegressor(n_estimators=120, random_state=42)
-    model.fit(X_train, y_train)
-    y_pred = model.predict(X_test)
-
-    r2 = r2_score(y_test, y_pred)
-    mse = mean_squared_error(y_test, y_pred)
-    st.markdown(f"**R²:** `{r2:.4f}` — **MSE:** `{mse:.6f}`")
-
-    chart_df = pd.DataFrame({"Gerçek (%)": y_test.values[:200], "Tahmin (%)": y_pred[:200]})
-    fig = px.line(chart_df, markers=True, template="plotly_white",
-                  title="Gerilim Düşümü (%) — Tahmin vs Gerçek")
-    fig.update_layout(yaxis_title="Gerilim Düşümü (%)", xaxis_title="Veri Noktası", title_font_size=20)
-    st.plotly_chart(fig, use_container_width=True)
-
+    # Download GeoJSON export
     try:
-        import shap
-        with st.expander("🔎 SHAP açıklamaları (isteğe bağlı)"):
-            explainer = shap.Explainer(model, X_train)
-            shap_values = explainer(X_test.iloc[:50])
-            shap_df = pd.DataFrame(shap_values.values, columns=X_train.columns)
-            mean_abs = shap_df.abs().mean().sort_values(ascending=False).reset_index()
-            mean_abs.columns = ["Özellik", "Ortalama |SHAP|"]
-            import plotly.express as px
-            fig2 = px.bar(mean_abs, x="Özellik", y="Ortalama |SHAP|", text_auto=True,
-                          title="Özellik Önemleri (SHAP)", template="plotly_white")
-            fig2.update_layout(yaxis_title="Etki (Ortalama |SHAP|)", xaxis_title="Özellik")
-            st.plotly_chart(fig2, use_container_width=True)
+        gj = {
+            "type":"FeatureCollection",
+            "features":[
+                {"type":"Feature","geometry":{"type":"LineString","coordinates":[[lon,lat] for (lat,lon) in best['route']]},
+                 "properties":{"L_m":best['L_m'],"dv_pct":best['dv_pct']}}
+            ]
+        }
+        st.download_button("⬇️ GeoJSON (Rota)", data=json.dumps(gj), mime="application/geo+json", file_name="rota.geojson")
     except Exception:
-        st.info("SHAP yüklenemedi (ortam desteklemiyor olabilir).")
+        pass
+
+# ===================== PAGE 2: Gerilim Düşümü (Synthetic) =====================
+elif selected == "Gerilim Düşümü":
+    st.subheader("📉 Gerilim Düşümü — Sentetik Senaryo Oyun Alanı")
+    st.caption("Parametrelerle oynayarak ΔV davranışını görselleştirin. Plotly grafikleri interaktiftir.")
+
+    with st.sidebar.expander("🔌 Parametreler"):
+        Vn_kV = st.number_input("Nominal gerilim (kV)", 0.4, 34.5, 0.4, 0.1, key="gd_vn")
+        pf = st.number_input("Güç faktörü (pf)", 0.5, 1.0, 0.9, 0.05, key="gd_pf")
+        R_ohm_km = st.number_input("R (Ω/km)", 0.05, 1.5, 0.642, 0.01, key="gd_R")
+        X_ohm_km = st.number_input("X (Ω/km)", 0.01, 1.0, 0.083, 0.01, key="gd_X")
+
+    # Synthetic grid
+    Ls = np.linspace(10, 2000, 120)  # meters
+    loads = np.linspace(5, 400, 120)  # kW
+    mesh = [(L, P) for L in Ls for P in loads]
+    df = pd.DataFrame(mesh, columns=["L_m","P_kw"])
+    df["dv_pct"] = df.apply(lambda r: vdrop_percent(r.P_kw, r.L_m, Vn_kV, pf, R_ohm_km, X_ohm_km), axis=1)
+
+    # Heatmap
+    fig_hm = px.density_heatmap(df, x="L_m", y="P_kw", z="dv_pct", nbinsx=40, nbinsy=40, histfunc="avg",
+                                title="ΔV (%) Isı Haritası (L vs P)", template="plotly_white")
+    fig_hm.update_layout(xaxis_title="Hat Uzunluğu (m)", yaxis_title="Yük (kW)")
+    st.plotly_chart(fig_hm, use_container_width=True)
+
+    # Isoline-like line slices
+    sel_load = st.slider("Kesit için Yük (kW)", 5, 400, 120, 5)
+    df_slice = df[df.P_kw==sel_load]
+    fig_ln = px.line(df_slice, x="L_m", y="dv_pct", markers=True, template="plotly_white",
+                     title=f"ΔV (%) — Sabit Yük: {sel_load} kW")
+    fig_ln.update_layout(xaxis_title="Hat Uzunluğu (m)", yaxis_title="ΔV (%)")
+    st.plotly_chart(fig_ln, use_container_width=True)
+
+# ===================== PAGE 3: Forecasting =====================
+elif selected == "Forecasting":
+    st.subheader("📈 Yük Tahmini (Forecasting)")
+    st.caption("Demo: sentetik zaman serisi + basit modeller. Gerçek sayaç/hat verinizle değiştirin.")
+
+    # Build synthetic daily load with weekly seasonality + trend
+    rng = np.random.default_rng(7)
+    days = pd.date_range("2024-01-01", periods=365, freq="D")
+    base = 300 + 0.1*np.arange(len(days))
+    weekly = 40*np.sin(2*np.pi*days.dayofweek/7)
+    noise = rng.normal(0, 15, len(days))
+    y = base + weekly + noise
+    ts = pd.DataFrame({"ds": days, "y": y})
+
+    # Try statsmodels Holt-Winters; fallback to rolling mean
+    yhat = None
+    try:
+        from statsmodels.tsa.holtwinters import ExponentialSmoothing
+        model = ExponentialSmoothing(ts.y, trend='add', seasonal='add', seasonal_periods=7)
+        fit = model.fit(optimized=True)
+        fut = fit.forecast(60)
+        fc = pd.DataFrame({"ds": pd.date_range(days[-1] + pd.Timedelta(days=1), periods=60), "yhat": fut.values})
+        yhat = fc
+    except Exception:
+        roll = ts.y.rolling(7, min_periods=1).mean()
+        fut = np.repeat(roll.iloc[-1], 60)
+        yhat = pd.DataFrame({"ds": pd.date_range(days[-1] + pd.Timedelta(days=1), periods=60), "yhat": fut})
+
+    fig_fc = px.line(title="Günlük Yük — Geçmiş ve Tahmin", template="plotly_white")
+    fig_fc.add_scatter(x=ts.ds, y=ts.y, mode="lines", name="Geçmiş")
+    fig_fc.add_scatter(x=yhat.ds, y=yhat.yhat, mode="lines", name="Tahmin")
+    fig_fc.update_layout(xaxis_title="Tarih", yaxis_title="kW")
+    st.plotly_chart(fig_fc, use_container_width=True)
+
+    st.info("Gerçek kullanım: sayaç/trafo günlük/yarım saatlik verinizi yükleyin, bu sayfada modele sokalım. ARIMA/Prophet opsiyonel eklenebilir.")
+
+# ===================== PAGE 4: Arıza/Anomali =====================
+elif selected == "Arıza/Anomali":
+    st.subheader("🚨 Arıza & Anomali Tespiti — Demo")
+    st.caption("IsolationForest ile akım/gerilim/kW sentetik veride anomali işaretleme.")
+
+    rng = np.random.default_rng(42)
+    n = 800
+    df = pd.DataFrame({
+        'V': rng.normal(230, 3.0, n),
+        'I': rng.normal(40, 5.0, n),
+        'P': lambda d: d['V']*d['I']/1000.0
+    })
+    df['P'] = df['V'] * df['I'] / 1000.0
+
+    # Inject anomalies
+    idx = rng.choice(n, size=20, replace=False)
+    df.loc[idx, 'V'] += rng.normal(-30, 6, len(idx))
+    df.loc[idx, 'I'] += rng.normal(35, 8, len(idx))
+
+    iso = IsolationForest(n_estimators=300, contamination=0.03, random_state=7)
+    preds = iso.fit_predict(df[['V','I','P']])
+    df['anomaly'] = (preds == -1).astype(int)
+
+    fig_sc = px.scatter(df, x='I', y='V', color=df['anomaly'].map({0:'Normal',1:'Anomali'}),
+                        title='Akım-Volt Çaprazı — Anomaliler', template='plotly_white')
+    st.plotly_chart(fig_sc, use_container_width=True)
+
+    rate = df['anomaly'].mean()*100
+    st.metric("Anomali Oranı", f"%{rate:.2f}")
+
+    with st.expander("Aykırı Nokta Tablosu"):
+        st.dataframe(df[df['anomaly']==1].head(50), use_container_width=True)
+
+    st.info("Gerçek sahada: olay logları + SCADA ölçümleri + röle kayıtları ile eğitilmiş bir model önerilir. Özellik zenginleştirme (harmonikler, THD, sıfır-seq.), zaman bağlamı ve lokasyon ilişkisi (GNN) eklenebilir.")
