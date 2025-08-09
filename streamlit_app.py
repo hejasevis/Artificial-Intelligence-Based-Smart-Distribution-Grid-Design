@@ -314,31 +314,137 @@ if selected == "Talep Girdisi":
     st.subheader("📡 Oluşturulan Şebeke Hattı")
     st_folium(m2, height=620, width="100%", key="result_map_basic")
 
-# ===================== SAYFA 2: Gerilim Düşümü (Sentetik) =====================
+# ===================== SAYFA 2: Gerilim Düşümü (k·L·N) =====================
 elif selected == "Gerilim Düşümü":
-    st.subheader("📉 Gerilim Düşümü — Sentetik Senaryo (k·L·N)")
-    st.caption("Parametrelerle oynayarak gerilim düşümü davranışını görün.")
+    st.subheader("📉 Gerilim Düşümü Analizi — k·L·N Modeli")
+    st.caption("Bu sayfa, senin istediğin formülle çalışır: **Gerilim Düşümü (%) = k × Hat Uzunluğu (L, m) × Yük (N, kW)**")
 
-    with st.sidebar.expander("🔌 Parametreler"):
+    with st.expander("Model Özeti", expanded=True):
+        st.markdown("""
+- **Formül:** `Gerilim Düşümü (%) = k · L · N`  
+  - `k`: sabit (saha/iletken/şartlara göre ayarlanır)  
+  - `L`: hat uzunluğu (metre)  
+  - `N`: yük (kW)  
+- **Amaç:** L ve N değiştikçe gerilim düşümünün nasıl davrandığını görmek; hangi **eşik** altında kaldığımızı görsel olarak ayırt etmek.
+        """)
+
+    # --- Kontroller (sol)
+    with st.sidebar.expander("🔧 Parametreler", expanded=True):
         k_const = st.number_input("k sabiti", 0.0, 1.0, 0.0001, 0.0001, key="gd_k")
+        drop_threshold_pct = st.number_input("Eşik (Gerilim Düşümü, %)", 0.5, 20.0, 5.0, 0.5, key="gd_thr")
 
-    Ls    = np.linspace(10, 2000, 120)   # m
-    loads = np.linspace(5,  400,  120)   # kW
-    mesh = [(L, P) for L in Ls for P in loads]
-    df = pd.DataFrame(mesh, columns=["L_m","P_kw"])
-    df["dv_pct"] = df.apply(lambda r: vdrop_pct_kLN(r.L_m, r.P_kw, k_const), axis=1)
+        st.markdown("**Kısayol (örnek ayarlar)**")
+        c1, c2 = st.columns(2)
+        if c1.button("Konut (düşük k)", use_container_width=True):
+            k_const = 0.00008
+        if c2.button("Sanayi (yüksek k)", use_container_width=True):
+            k_const = 0.00015
 
-    fig_hm = px.density_heatmap(df, x="L_m", y="P_kw", z="dv_pct", nbinsx=40, nbinsy=40, histfunc="avg",
-                                title="Gerilim Düşümü (%) Isı Haritası (L vs P)", template="plotly_white")
-    fig_hm.update_layout(xaxis_title="Hat Uzunluğu (m)", yaxis_title="Yük (kW)")
-    st.plotly_chart(fig_hm, use_container_width=True)
+        st.divider()
+        # Tekil kesit incelemeleri için seçimler
+        L_fixed = st.slider("Sabit L (m) — P'ye karşı eğri", 10, 3000, 400, 10)
+        P_fixed = st.slider("Sabit N (kW) — L'ye karşı eğri", 1, 800, 150, 1)
 
-    sel_load = st.slider("Kesit için Yük (kW)", 5, 400, 120, 5)
-    df_slice = df[df.P_kw == sel_load]
-    fig_ln = px.line(df_slice, x="L_m", y="dv_pct", markers=True, template="plotly_white",
-                     title=f"Gerilim Düşümü (%) — Sabit Yük: {sel_load} kW")
-    fig_ln.update_layout(xaxis_title="Hat Uzunluğu (m)", yaxis_title="Gerilim Düşümü (%)")
-    st.plotly_chart(fig_ln, use_container_width=True)
+    # --- Veri ızgarası
+    Ls    = np.linspace(10, 3000, 150)   # m
+    loads = np.linspace(1,  800,  150)   # kW
+    L_grid, P_grid = np.meshgrid(Ls, loads)
+    dv_grid = k_const * L_grid * P_grid  # k·L·N
+
+    # ========= ÜST KARTLAR =========
+    max_dv   = float(np.nanmax(dv_grid))
+    median_dv= float(np.nanmedian(dv_grid))
+    feas_pct = float((dv_grid <= drop_threshold_pct).sum() / dv_grid.size * 100)
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Maks. Gerilim Düşümü", f"%{max_dv:.2f}")
+    m2.metric("Medyan Gerilim Düşümü", f"%{median_dv:.2f}")
+    m3.metric("Eşik Altı Alan", f"%{feas_pct:.1f}")
+
+    st.divider()
+
+    # ========= A) Eşik Alanı Haritası (uygun/uygunsuz) =========
+    st.markdown("### 🗺️ Eşik Alanı — Uygun/Uygunsuz (Isı Haritası)")
+    feas = (dv_grid <= drop_threshold_pct).astype(int)
+    # 0=Uygunsuz(>eşik), 1=Uygun(≤eşik). Görselleştirmede 0/1 yerine etiket kullanacağız.
+    feas_df = pd.DataFrame(feas, index=[f"{int(p)}" for p in loads], columns=[f"{int(l)}" for l in Ls])
+    fig_feas = px.imshow(
+        feas_df.values,
+        x=feas_df.columns, y=feas_df.index,
+        aspect="auto",
+        color_continuous_scale=[[0, "#f94144"], [1, "#90be6d"]],
+        title=f"Eşik: %{drop_threshold_pct:.2f} — Yeşil=Uygun, Kırmızı=Uygunsuz",
+        labels=dict(x="Hat Uzunluğu L (m)", y="Yük N (kW)", color="Uygunluk"),
+        origin="lower"
+    )
+    fig_feas.update_coloraxes(showscale=False)
+    st.plotly_chart(fig_feas, use_container_width=True)
+
+    st.caption("**Not:** k sabiti büyüdükçe veya eşik küçüldükçe yeşil alan daralır.")
+
+    st.divider()
+
+    # ========= B) Tekil Kesitler: L'ye ve N'e karşı eğriler =========
+    st.markdown("### 📈 Kesit Grafikleri (Okunabilir Karşılaştırma)")
+
+    # (1) Sabit N=P_fixed iken L'ye karşı
+    dv_L_curve = k_const * Ls * P_fixed
+    fig_ln_L = px.line(
+        x=Ls, y=dv_L_curve, markers=True, template="plotly_white",
+        title=f"Gerilim Düşümü (%) — Sabit Yük: {P_fixed} kW (L'ye karşı)"
+    )
+    fig_ln_L.add_hline(y=drop_threshold_pct, line_dash="dot", annotation_text=f"Eşik %{drop_threshold_pct:.2f}")
+    fig_ln_L.update_layout(xaxis_title="Hat Uzunluğu L (m)", yaxis_title="Gerilim Düşümü (%)")
+
+    # (2) Sabit L=L_fixed iken N'e karşı
+    dv_P_curve = k_const * L_fixed * loads
+    fig_ln_P = px.line(
+        x=loads, y=dv_P_curve, markers=True, template="plotly_white",
+        title=f"Gerilim Düşümü (%) — Sabit Hat Uzunluğu: {L_fixed} m (N'e karşı)"
+    )
+    fig_ln_P.add_hline(y=drop_threshold_pct, line_dash="dot", annotation_text=f"Eşik %{drop_threshold_pct:.2f}")
+    fig_ln_P.update_layout(xaxis_title="Yük N (kW)", yaxis_title="Gerilim Düşümü (%)")
+
+    cL, cP = st.columns(2)
+    cL.plotly_chart(fig_ln_L, use_container_width=True)
+    cP.plotly_chart(fig_ln_P, use_container_width=True)
+
+    st.divider()
+
+    # ========= C) Senaryo Karşılaştırma (A/B) =========
+    st.markdown("### 🥊 Senaryo Karşılaştırma (A/B)")
+
+    sA1, sA2, sA3 = st.columns(3)
+    with sA1: L_A = st.number_input("Senaryo A — L (m)", 10, 5000, 600, 10)
+    with sA2: P_A = st.number_input("Senaryo A — N (kW)", 1,  2000, 200, 1)
+    with sA3: k_A = st.number_input("Senaryo A — k", 0.0, 1.0, float(k_const), 0.0001)
+
+    sB1, sB2, sB3 = st.columns(3)
+    with sB1: L_B = st.number_input("Senaryo B — L (m)", 10, 5000, 400, 10)
+    with sB2: P_B = st.number_input("Senaryo B — N (kW)", 1,  2000, 120, 1)
+    with sB3: k_B = st.number_input("Senaryo B — k", 0.0, 1.0, float(k_const), 0.0001)
+
+    dv_A = k_A * L_A * P_A
+    dv_B = k_B * L_B * P_B
+
+    a1, a2, a3 = st.columns(3)
+    a1.metric("A — Gerilim Düşümü", f"%{dv_A:.2f}")
+    a2.metric("B — Gerilim Düşümü", f"%{dv_B:.2f}")
+    diff_txt = "A daha kötü" if dv_A > dv_B else ("B daha kötü" if dv_B > dv_A else "Eşit")
+    a3.metric("Karar", diff_txt)
+
+    # Çubuk grafikte göster
+    comp_df = pd.DataFrame({
+        "Senaryo": ["A", "B"],
+        "Gerilim Düşümü (%)": [dv_A, dv_B]
+    })
+    fig_bar = px.bar(comp_df, x="Senaryo", y="Gerilim Düşümü (%)", text_auto=True, template="plotly_white",
+                     title="A/B Karşılaştırma")
+    fig_bar.add_hline(y=drop_threshold_pct, line_dash="dot", annotation_text=f"Eşik %{drop_threshold_pct:.2f}")
+    st.plotly_chart(fig_bar, use_container_width=True)
+
+    st.info("👉 İpucu: Eşiği, k’yı, L ve N değerlerini oynatarak hangi parametrenin düşümü daha hızlı artırdığını sezgisel görün.")
+
 
 # ===================== SAYFA 3: Forecasting =====================
 elif selected == "Forecasting":
