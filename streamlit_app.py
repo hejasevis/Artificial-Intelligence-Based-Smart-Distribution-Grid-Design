@@ -23,15 +23,6 @@ try:
 except Exception:
     HAS_KDTREE = False
 
-# Yol rotası için (opsiyonel)
-try:
-    import osmnx as ox
-    import networkx as nx
-    HAS_OSMNX = True
-    ox.settings.use_cache = True
-except Exception:
-    HAS_OSMNX = False
-
 # ===================== GENEL =====================
 st.set_page_config(page_title="Yapay Zeka ile Akıllı Dağıtım Şebekesi Tasarımı", layout="wide")
 st.title("🔌 Yapay Zeka ile Akıllı Dağıtım Şebekesi Tasarımı")
@@ -55,7 +46,7 @@ selected = option_menu(
 def load_data():
     direk_df = pd.read_excel("Direk Sorgu Sonuçları.xlsx")
     trafo_df = pd.read_excel("Trafo Sorgu Sonuçları.xlsx")
-    ext_df   = pd.read_csv("smart_grid_dataset.csv")  # diğer sayfalarda opsiyonel
+    ext_df   = pd.read_csv("smart_grid_dataset.csv")  # diğer sayfalarda opsiyonel kullanılır
     return direk_df, trafo_df, ext_df
 
 direk_df, trafo_df, ext_df = load_data()
@@ -73,6 +64,7 @@ trafo_clean = (
 )
 
 # ===================== YARDIMCI =====================
+
 def get_transformers():
     if not HAS_PYPROJ:
         raise RuntimeError("pyproj mevcut değil")
@@ -80,19 +72,13 @@ def get_transformers():
     bwd = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
     return fwd, bwd
 
-def vdrop_percent(P_kw, L_m, Vn_kV=0.4, cosphi=0.9, R_ohm_km=0.642, X_ohm_km=0.083):
-    """3-faz yaklaşık gerilim düşümü (%)"""
+# --- Gerilim düşümü (senin istediğin model): %e = k * L * N ---
+# L: metre, N: kW, k: sabit
+def vdrop_pct_kLN(L_m: float, P_kw: float, k: float = 0.0001) -> float:
     try:
-        L_km = float(L_m) / 1000.0
-        V = float(Vn_kV) * 1e3
-        P = float(P_kw) * 1e3
-        I = P / (np.sqrt(3) * V * float(cosphi))
-        sinphi = np.sqrt(max(0.0, 1.0 - float(cosphi) ** 2))
-        Z_proj = float(R_ohm_km) * L_km * float(cosphi) + float(X_ohm_km) * L_km * sinphi
-        dV = 100.0 * (np.sqrt(3) * I * Z_proj) / V
-        return float(dV)
+        return float(k) * float(L_m) * float(P_kw)
     except Exception:
-        return np.nan
+        return float("nan")
 
 def dedup_seq(seq):
     out = []
@@ -111,7 +97,7 @@ def build_kdtree(points_xy):
 
 def build_route_and_stats(demand_latlon, trafo_latlon, poles_latlon, max_span=40.0, snap_radius=30.0):
     """
-    (OSM yoksa) düz hat üzerinde örnekle + KD-Tree snap
+    Rota ve istatistikleri döndürür.
     Returns: route_latlon, total_len_m, used_count, proposed_count, spans_m
     """
     try:
@@ -161,98 +147,14 @@ def build_route_and_stats(demand_latlon, trafo_latlon, poles_latlon, max_span=40
         final_path = [demand_latlon, trafo_latlon]
         return final_path, total_len_m, 0, 1, [total_len_m]
 
-# ---------- OSM Yol Rotalama ----------
-def _shortest_road_route(demand_latlon, trafo_latlon):
-    """OSM yol grafiği üzerinde en kısa rota (lat,lon)"""
-    if not HAS_OSMNX:
-        raise RuntimeError("osmnx yok")
-    (lat1, lon1), (lat2, lon2) = demand_latlon, trafo_latlon
-    min_lat, max_lat = min(lat1, lat2), max(lat1, lat2)
-    min_lon, max_lon = min(lon1, lon2), max(lon1, lon2)
-    expand = 0.01  # ~1 km civarı güvenlik payı
-    north, south = max_lat + expand, min_lat - expand
-    east, west   = max_lon + expand, min_lon - expand
-    G = ox.graph_from_bbox(north, south, east, west, network_type="drive")
-    orig = ox.distance.nearest_nodes(G, lon1, lat1)
-    dest = ox.distance.nearest_nodes(G, lon2, lat2)
-    path = nx.shortest_path(G, orig, dest, weight="length")
-    coords = [(G.nodes[n]["y"], G.nodes[n]["x"]) for n in path]  # (lat, lon)
-    return coords
-
-def _polyline_length_m(coords):
-    L = 0.0
-    for i in range(len(coords)-1):
-        L += geodesic(coords[i], coords[i+1]).meters
-    return L
-
-def _sample_along_polyline(coords, step_m):
-    """Polylineda her step_m metre için nokta üret (lat,lon)."""
-    if len(coords) < 2:
-        return coords[:]
-    out = [coords[0]]
-    carry = 0.0
-    for i in range(len(coords)-1):
-        a, b = coords[i], coords[i+1]
-        seg = geodesic(a, b).meters
-        if seg == 0:
-            continue
-        dist_along = carry
-        while dist_along + step_m <= seg:
-            t = (dist_along + step_m) / seg
-            lat = a[0] + t * (b[0] - a[0])
-            lon = a[1] + t * (b[1] - a[1])
-            out.append((lat, lon))
-            dist_along += step_m
-        carry = seg - dist_along
-    if out[-1] != coords[-1]:
-        out.append(coords[-1])
-    return out
-
-def build_route_via_roads(demand_latlon, trafo_latlon, poles_latlon, max_span=40.0, snap_radius=30.0):
-    """
-    Yol (OSM) üzerinden rota + direk yerleştirme.
-    Döndürür: route_latlon, total_len_m, used_count, proposed_count
-    """
-    road_line = _shortest_road_route(demand_latlon, trafo_latlon)
-    total_len_m = _polyline_length_m(road_line)
-    samples = _sample_along_polyline(road_line, max_span)
-
-    # Mevcut direklere snap (geodesic)
-    used = 0
-    proposed = 0
-    route_pts = []
-    for s in samples:
-        best = None
-        best_d = None
-        for p in poles_latlon:
-            d = geodesic(s, p).meters
-            if best_d is None or d < best_d:
-                best_d = d; best = p
-        if best_d is not None and best_d <= float(snap_radius):
-            route_pts.append(best); used += 1
-        else:
-            route_pts.append(s); proposed += 1
-
-    if route_pts:
-        route_pts[0] = demand_latlon
-        route_pts[-1] = trafo_latlon
-
-    route_pts = dedup_seq(route_pts)
-    return route_pts, total_len_m, used, max(0, proposed - 2)
-
 # ===================== SAYFA 1: Talep Girdisi =====================
 if selected == "Talep Girdisi":
     st.sidebar.header("⚙️ Hat Parametreleri")
     max_span     = st.sidebar.number_input("Maks. direk aralığı (m)", 20, 120, 40, 5)
     snap_radius  = st.sidebar.number_input("Mevcut direğe snap yarıçapı (m)", 5, 120, 30, 5)
-    use_roads    = st.sidebar.checkbox("Yolu Takip Et (OSM ile)", value=True if HAS_OSMNX else False,
-                                       help="OSM varsa rota yollardan geçer; yoksa doğrusal yöntem kullanılır.")
 
     with st.sidebar.expander("🔌 Elektrik Parametreleri"):
-        Vn_kV   = st.number_input("Nominal gerilim (kV)", 0.4, 34.5, 0.4, 0.1)
-        pf      = st.number_input("Güç faktörü (pf)", 0.5, 1.0, 0.9, 0.05)
-        R_ohm_km= st.number_input("R (Ω/km)", 0.05, 1.5, 0.642, 0.01)
-        X_ohm_km= st.number_input("X (Ω/km)", 0.01, 1.0, 0.083, 0.01)
+        k_const = st.number_input("k sabiti", 0.0, 1.0, 0.0001, 0.0001)
         drop_threshold_pct = st.number_input("Gerilim düşümü eşiği (%)", 1.0, 15.0, 5.0, 0.5)
 
     st.subheader("📍 Talep Noktasını Seçin (Harita)")
@@ -296,34 +198,25 @@ if selected == "Talep Girdisi":
     st.subheader("⚡ Talep Edilen Yük (kW)")
     user_kw = st.slider("Talep edilen güç", 1, 500, 120, 5, key="kw_slider_basic")
 
-    # Trafo değerlendirme
+    # Trafo değerlendirme: önce geodesic'e göre en yakın 8'i seç, her birinde rota üret ve gerilim düşümünü hesapla
     def eval_trafo(row):
         t_latlon = (float(row["Enlem"]), float(row["Boylam"]))
         poles_latlon = list(zip(direk_clean["Enlem"].astype(float), direk_clean["Boylam"].astype(float)))
-
-        if use_roads and HAS_OSMNX:
-            route, Lm, used, prop = build_route_via_roads(
-                (new_lat, new_lon), t_latlon, poles_latlon,
-                max_span=max_span, snap_radius=snap_radius
-            )
-        else:
-            route, Lm, used, prop, _ = build_route_and_stats(
-                (new_lat, new_lon), t_latlon, poles_latlon,
-                max_span=max_span, snap_radius=snap_radius
-            )
-
-        dv = vdrop_percent(user_kw, Lm, Vn_kV, pf, R_ohm_km, X_ohm_km)
+        route, Lm, used, prop, spans = build_route_and_stats((new_lat, new_lon), t_latlon, poles_latlon,
+                                                             max_span=max_span, snap_radius=snap_radius)
+        dv = vdrop_pct_kLN(Lm, user_kw, k_const)  # <-- k·L·N
         cap_ok = False
         try:
             kva = float(row["Gücü[kVA]"])
-            cap_ok = (kva * pf) >= user_kw
+            cap_ok = (kva * 0.8) >= user_kw  # pf=0.8 varsayımı (isteğe bağlı parametreleşir)
         except Exception:
             pass
         return {
             "Montaj Yeri": row["Montaj Yeri"],
             "Gücü[kVA]": row["Gücü[kVA]"],
             "lat": t_latlon[0], "lon": t_latlon[1],
-            "route": route, "L_m": Lm, "ΔV (%)": dv, "Kapasite Uygun": cap_ok,
+            "route": route, "L_m": Lm,
+            "Gerilim Düşümü (%)": dv, "Kapasite Uygun": cap_ok,
             "Kullanılan Direk": used, "Yeni Direk": prop
         }
 
@@ -333,21 +226,18 @@ if selected == "Talep Girdisi":
     )
     topN = trafo_local.sort_values("geo_dist").head(8)
     evals = [eval_trafo(r) for _, r in topN.iterrows()]
-    cand_df = pd.DataFrame(evals).sort_values(by=["Kapasite Uygun", "ΔV (%)", "Yeni Direk", "L_m"],
-                                              ascending=[False, True, True, True])
+    cand_df = pd.DataFrame(evals).sort_values(
+        by=["Kapasite Uygun", "Gerilim Düşümü (%)", "Yeni Direk", "L_m"],
+        ascending=[False, True, True, True]
+    )
 
-    with st.expander("📈 En Uygun Trafo Adayları (rota ve ΔV ile)"):
-        st.dataframe(cand_df[["Montaj Yeri", "Gücü[kVA]", "L_m", "ΔV (%)", "Kapasite Uygun", "Yeni Direk"]],
-                     use_container_width=True)
+    with st.expander("📈 En Uygun Trafo Adayları (rota ve gerilim düşümü ile)"):
+        st.dataframe(
+            cand_df[["Montaj Yeri", "Gücü[kVA]", "L_m", "Gerilim Düşümü (%)", "Kapasite Uygun", "Yeni Direk"]],
+            use_container_width=True
+        )
 
     best = cand_df.iloc[0]
-
-    # 400 kVA üstü uyarı
-    try:
-        if float(best["Gücü[kVA]"]) > 400:
-            st.warning("Mevcut trafo gücü 400 kVA'dan büyük; yeni trafo gerekebilir.")
-    except Exception:
-        pass
 
     # Sonuç haritası
     m2 = folium.Map(location=[new_lat, new_lon], zoom_start=16, control_scale=True)
@@ -369,11 +259,11 @@ if selected == "Talep Girdisi":
     folium.Marker((best["lat"], best["lon"]), icon=folium.Icon(color="orange", icon="bolt", prefix="fa"),
                   tooltip="Seçilen Trafo").add_to(m2)
 
-    # Rota + nokta tipleri (mavi=mevcut, mor=yeni)
+    # Rota + rota üzerindeki nokta tipleri (mavi=mevcut, mor=yeni)
     if len(best["route"]) >= 2:
         try:
             if HAS_PYPROJ:
-                fwd, _ = get_transformers()
+                fwd = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
                 to_xy = lambda lon, lat: fwd.transform(lon, lat)
                 poles_xy = [to_xy(lon, lat) for (lat, lon) in zip(direk_clean["Enlem"], direk_clean["Boylam"])]
                 snapped_set = set(poles_xy)
@@ -393,50 +283,61 @@ if selected == "Talep Girdisi":
     else:
         st.warning("Hat noktaları üretilemedi.")
 
+    # Özet metrikler
     st.subheader("🧾 Hat Özeti")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Toplam Uzunluk", f"{best['L_m']:.1f} m")
     c2.metric("Kullanılan Mevcut Direk", f"{int(best['Kullanılan Direk'])}")
     c3.metric("Önerilen Yeni Direk", f"{int(best['Yeni Direk'])}")
-    # Ortalama açıklık (basit tahmin)
-    avg_span = best["L_m"] / max(1, (len(best["route"]) - 1))
+    # Ortalama açıklık (yaklaşık)
+    avg_span = best["L_m"] / max(1, len(best["route"]) - 1)
     c4.metric("Ortalama Direk Aralığı", f"{avg_span:.1f} m")
 
-    if best["ΔV (%)"] > drop_threshold_pct:
-        st.error(f"⚠️ Gerilim düşümü %{best['ΔV (%)']:.2f} — eşik %{drop_threshold_pct:.1f} üstü.")
+    # Bildirimler (ikili koşul)
+    dv_val = float(best["Gerilim Düşümü (%)"])
+    try:
+        best_kva = float(best["Gücü[kVA]"])
+    except Exception:
+        best_kva = None
+
+    if dv_val > drop_threshold_pct:
+        st.error(f"⚠️ Gerilim düşümü %{dv_val:.2f} — eşik %{drop_threshold_pct:.1f} üstü.")
     else:
-        st.success(f"✅ ΔV %{best['ΔV (%)']:.2f} ≤ %{drop_threshold_pct:.1f}")
+        st.success(f"✅ Gerilim düşümü %{dv_val:.2f} ≤ %{drop_threshold_pct:.1f}")
+
+    if (best_kva is not None) and (best_kva > 400):
+        if dv_val > drop_threshold_pct:
+            st.error("⚠️ Mevcut trafo gücü 400 kVA üzerinde ve gerilim düşümü eşiği aşılıyor — **ek trafo gerekebilir**.")
+        else:
+            st.warning("ℹ️ Mevcut trafo gücü 400 kVA üzerinde — **ek trafo gerekebilir** (saha kontrolü önerilir).")
 
     st.subheader("📡 Oluşturulan Şebeke Hattı")
     st_folium(m2, height=620, width="100%", key="result_map_basic")
 
 # ===================== SAYFA 2: Gerilim Düşümü (Sentetik) =====================
 elif selected == "Gerilim Düşümü":
-    st.subheader("📉 Gerilim Düşümü — Sentetik Senaryo")
-    st.caption("Parametrelerle oynayarak ΔV davranışını görün.")
+    st.subheader("📉 Gerilim Düşümü — Sentetik Senaryo (k·L·N)")
+    st.caption("Parametrelerle oynayarak gerilim düşümü davranışını görün.")
 
     with st.sidebar.expander("🔌 Parametreler"):
-        Vn_kV   = st.number_input("Nominal gerilim (kV)", 0.4, 34.5, 0.4, 0.1, key="gd_vn")
-        pf      = st.number_input("Güç faktörü (pf)", 0.5, 1.0, 0.9, 0.05, key="gd_pf")
-        R_ohm_km= st.number_input("R (Ω/km)", 0.05, 1.5, 0.642, 0.01, key="gd_R")
-        X_ohm_km= st.number_input("X (Ω/km)", 0.01, 1.0, 0.083, 0.01, key="gd_X")
+        k_const = st.number_input("k sabiti", 0.0, 1.0, 0.0001, 0.0001, key="gd_k")
 
     Ls    = np.linspace(10, 2000, 120)   # m
     loads = np.linspace(5,  400,  120)   # kW
     mesh = [(L, P) for L in Ls for P in loads]
     df = pd.DataFrame(mesh, columns=["L_m","P_kw"])
-    df["dv_pct"] = df.apply(lambda r: vdrop_percent(r.P_kw, r.L_m, Vn_kV, pf, R_ohm_km, X_ohm_km), axis=1)
+    df["dv_pct"] = df.apply(lambda r: vdrop_pct_kLN(r.L_m, r.P_kw, k_const), axis=1)
 
     fig_hm = px.density_heatmap(df, x="L_m", y="P_kw", z="dv_pct", nbinsx=40, nbinsy=40, histfunc="avg",
-                                title="ΔV (%) Isı Haritası (L vs P)", template="plotly_white")
+                                title="Gerilim Düşümü (%) Isı Haritası (L vs P)", template="plotly_white")
     fig_hm.update_layout(xaxis_title="Hat Uzunluğu (m)", yaxis_title="Yük (kW)")
     st.plotly_chart(fig_hm, use_container_width=True)
 
     sel_load = st.slider("Kesit için Yük (kW)", 5, 400, 120, 5)
     df_slice = df[df.P_kw == sel_load]
     fig_ln = px.line(df_slice, x="L_m", y="dv_pct", markers=True, template="plotly_white",
-                     title=f"ΔV (%) — Sabit Yük: {sel_load} kW")
-    fig_ln.update_layout(xaxis_title="Hat Uzunluğu (m)", yaxis_title="ΔV (%)")
+                     title=f"Gerilim Düşümü (%) — Sabit Yük: {sel_load} kW")
+    fig_ln.update_layout(xaxis_title="Hat Uzunluğu (m)", yaxis_title="Gerilim Düşümü (%)")
     st.plotly_chart(fig_ln, use_container_width=True)
 
 # ===================== SAYFA 3: Forecasting =====================
