@@ -9,10 +9,8 @@ from shapely.geometry import LineString
 from geopy.distance import geodesic
 import plotly.express as px
 from sklearn.ensemble import IsolationForest
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import r2_score, mean_squared_error
 
-# --- Opsiyonel ---
+# --- Opsiyonel hızlandırıcılar (varsa kullanılır) ---
 try:
     from pyproj import Transformer
     HAS_PYPROJ = True
@@ -24,6 +22,15 @@ try:
     HAS_KDTREE = True
 except Exception:
     HAS_KDTREE = False
+
+# Yol rotası için (opsiyonel)
+try:
+    import osmnx as ox
+    import networkx as nx
+    HAS_OSMNX = True
+    ox.settings.use_cache = True
+except Exception:
+    HAS_OSMNX = False
 
 # ===================== GENEL =====================
 st.set_page_config(page_title="Yapay Zeka ile Akıllı Dağıtım Şebekesi Tasarımı", layout="wide")
@@ -48,7 +55,7 @@ selected = option_menu(
 def load_data():
     direk_df = pd.read_excel("Direk Sorgu Sonuçları.xlsx")
     trafo_df = pd.read_excel("Trafo Sorgu Sonuçları.xlsx")
-    ext_df   = pd.read_csv("smart_grid_dataset.csv")  # diğer sayfalarda opsiyonel kullanılabilir
+    ext_df   = pd.read_csv("smart_grid_dataset.csv")  # diğer sayfalarda opsiyonel
     return direk_df, trafo_df, ext_df
 
 direk_df, trafo_df, ext_df = load_data()
@@ -104,7 +111,7 @@ def build_kdtree(points_xy):
 
 def build_route_and_stats(demand_latlon, trafo_latlon, poles_latlon, max_span=40.0, snap_radius=30.0):
     """
-    Rota ve istatistikleri döndürür.
+    (OSM yoksa) düz hat üzerinde örnekle + KD-Tree snap
     Returns: route_latlon, total_len_m, used_count, proposed_count, spans_m
     """
     try:
@@ -154,11 +161,92 @@ def build_route_and_stats(demand_latlon, trafo_latlon, poles_latlon, max_span=40
         final_path = [demand_latlon, trafo_latlon]
         return final_path, total_len_m, 0, 1, [total_len_m]
 
+# ---------- OSM Yol Rotalama ----------
+def _shortest_road_route(demand_latlon, trafo_latlon):
+    """OSM yol grafiği üzerinde en kısa rota (lat,lon)"""
+    if not HAS_OSMNX:
+        raise RuntimeError("osmnx yok")
+    (lat1, lon1), (lat2, lon2) = demand_latlon, trafo_latlon
+    min_lat, max_lat = min(lat1, lat2), max(lat1, lat2)
+    min_lon, max_lon = min(lon1, lon2), max(lon1, lon2)
+    expand = 0.01  # ~1 km civarı güvenlik payı
+    north, south = max_lat + expand, min_lat - expand
+    east, west   = max_lon + expand, min_lon - expand
+    G = ox.graph_from_bbox(north, south, east, west, network_type="drive")
+    orig = ox.distance.nearest_nodes(G, lon1, lat1)
+    dest = ox.distance.nearest_nodes(G, lon2, lat2)
+    path = nx.shortest_path(G, orig, dest, weight="length")
+    coords = [(G.nodes[n]["y"], G.nodes[n]["x"]) for n in path]  # (lat, lon)
+    return coords
+
+def _polyline_length_m(coords):
+    L = 0.0
+    for i in range(len(coords)-1):
+        L += geodesic(coords[i], coords[i+1]).meters
+    return L
+
+def _sample_along_polyline(coords, step_m):
+    """Polylineda her step_m metre için nokta üret (lat,lon)."""
+    if len(coords) < 2:
+        return coords[:]
+    out = [coords[0]]
+    carry = 0.0
+    for i in range(len(coords)-1):
+        a, b = coords[i], coords[i+1]
+        seg = geodesic(a, b).meters
+        if seg == 0:
+            continue
+        dist_along = carry
+        while dist_along + step_m <= seg:
+            t = (dist_along + step_m) / seg
+            lat = a[0] + t * (b[0] - a[0])
+            lon = a[1] + t * (b[1] - a[1])
+            out.append((lat, lon))
+            dist_along += step_m
+        carry = seg - dist_along
+    if out[-1] != coords[-1]:
+        out.append(coords[-1])
+    return out
+
+def build_route_via_roads(demand_latlon, trafo_latlon, poles_latlon, max_span=40.0, snap_radius=30.0):
+    """
+    Yol (OSM) üzerinden rota + direk yerleştirme.
+    Döndürür: route_latlon, total_len_m, used_count, proposed_count
+    """
+    road_line = _shortest_road_route(demand_latlon, trafo_latlon)
+    total_len_m = _polyline_length_m(road_line)
+    samples = _sample_along_polyline(road_line, max_span)
+
+    # Mevcut direklere snap (geodesic)
+    used = 0
+    proposed = 0
+    route_pts = []
+    for s in samples:
+        best = None
+        best_d = None
+        for p in poles_latlon:
+            d = geodesic(s, p).meters
+            if best_d is None or d < best_d:
+                best_d = d; best = p
+        if best_d is not None and best_d <= float(snap_radius):
+            route_pts.append(best); used += 1
+        else:
+            route_pts.append(s); proposed += 1
+
+    if route_pts:
+        route_pts[0] = demand_latlon
+        route_pts[-1] = trafo_latlon
+
+    route_pts = dedup_seq(route_pts)
+    return route_pts, total_len_m, used, max(0, proposed - 2)
+
 # ===================== SAYFA 1: Talep Girdisi =====================
 if selected == "Talep Girdisi":
     st.sidebar.header("⚙️ Hat Parametreleri")
     max_span     = st.sidebar.number_input("Maks. direk aralığı (m)", 20, 120, 40, 5)
     snap_radius  = st.sidebar.number_input("Mevcut direğe snap yarıçapı (m)", 5, 120, 30, 5)
+    use_roads    = st.sidebar.checkbox("Yolu Takip Et (OSM ile)", value=True if HAS_OSMNX else False,
+                                       help="OSM varsa rota yollardan geçer; yoksa doğrusal yöntem kullanılır.")
 
     with st.sidebar.expander("🔌 Elektrik Parametreleri"):
         Vn_kV   = st.number_input("Nominal gerilim (kV)", 0.4, 34.5, 0.4, 0.1)
@@ -208,12 +296,22 @@ if selected == "Talep Girdisi":
     st.subheader("⚡ Talep Edilen Yük (kW)")
     user_kw = st.slider("Talep edilen güç", 1, 500, 120, 5, key="kw_slider_basic")
 
-    # Trafo değerlendirme: önce geodesic'e göre en yakın 8'i seç, her birinde rota üret ve ΔV hesapla
+    # Trafo değerlendirme
     def eval_trafo(row):
         t_latlon = (float(row["Enlem"]), float(row["Boylam"]))
         poles_latlon = list(zip(direk_clean["Enlem"].astype(float), direk_clean["Boylam"].astype(float)))
-        route, Lm, used, prop, spans = build_route_and_stats((new_lat, new_lon), t_latlon, poles_latlon,
-                                                             max_span=max_span, snap_radius=snap_radius)
+
+        if use_roads and HAS_OSMNX:
+            route, Lm, used, prop = build_route_via_roads(
+                (new_lat, new_lon), t_latlon, poles_latlon,
+                max_span=max_span, snap_radius=snap_radius
+            )
+        else:
+            route, Lm, used, prop, _ = build_route_and_stats(
+                (new_lat, new_lon), t_latlon, poles_latlon,
+                max_span=max_span, snap_radius=snap_radius
+            )
+
         dv = vdrop_percent(user_kw, Lm, Vn_kV, pf, R_ohm_km, X_ohm_km)
         cap_ok = False
         try:
@@ -244,6 +342,13 @@ if selected == "Talep Girdisi":
 
     best = cand_df.iloc[0]
 
+    # 400 kVA üstü uyarı
+    try:
+        if float(best["Gücü[kVA]"]) > 400:
+            st.warning("Mevcut trafo gücü 400 kVA'dan büyük; yeni trafo gerekebilir.")
+    except Exception:
+        pass
+
     # Sonuç haritası
     m2 = folium.Map(location=[new_lat, new_lon], zoom_start=16, control_scale=True)
 
@@ -264,10 +369,9 @@ if selected == "Talep Girdisi":
     folium.Marker((best["lat"], best["lon"]), icon=folium.Icon(color="orange", icon="bolt", prefix="fa"),
                   tooltip="Seçilen Trafo").add_to(m2)
 
-    # Rota + rota üzerindeki nokta tipleri (mavi=mevcut, mor=yeni)
+    # Rota + nokta tipleri (mavi=mevcut, mor=yeni)
     if len(best["route"]) >= 2:
         try:
-            # Rota noktalarını XY'ye çevir ve mevcut direk XY seti ile karşılaştır
             if HAS_PYPROJ:
                 fwd, _ = get_transformers()
                 to_xy = lambda lon, lat: fwd.transform(lon, lat)
@@ -294,18 +398,8 @@ if selected == "Talep Girdisi":
     c1.metric("Toplam Uzunluk", f"{best['L_m']:.1f} m")
     c2.metric("Kullanılan Mevcut Direk", f"{int(best['Kullanılan Direk'])}")
     c3.metric("Önerilen Yeni Direk", f"{int(best['Yeni Direk'])}")
-    spans = []
-    if "route" in best and len(best["route"]) >= 2 and HAS_PYPROJ:
-        # spans zaten build_route_and_stats içinde hesaplanıyor ama burada ortalama için basit yaklaşım:
-        try:
-            _, _, _, _, spans = build_route_and_stats(
-                (new_lat, new_lon), (best["lat"], best["lon"]),
-                list(zip(direk_clean["Enlem"], direk_clean["Boylam"])),
-                max_span=max_span, snap_radius=snap_radius
-            )
-        except Exception:
-            spans = []
-    avg_span = float(np.mean(spans)) if spans else 0.0
+    # Ortalama açıklık (basit tahmin)
+    avg_span = best["L_m"] / max(1, (len(best["route"]) - 1))
     c4.metric("Ortalama Direk Aralığı", f"{avg_span:.1f} m")
 
     if best["ΔV (%)"] > drop_threshold_pct:
