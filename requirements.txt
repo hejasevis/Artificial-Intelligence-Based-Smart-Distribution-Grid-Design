@@ -11,5 +11,3 @@ scipy
 plotly
 scikit-learn
 statsmodels
-osmnx
-networkx
