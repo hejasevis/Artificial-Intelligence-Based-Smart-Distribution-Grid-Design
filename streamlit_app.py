@@ -314,50 +314,120 @@ if selected == "Talep Girdisi":
     st.subheader("📡 Oluşturulan Şebeke Hattı")
     st_folium(m2, height=620, width="100%", key="result_map_basic")
 
-# ===================== SAYFA 2: Gerilim Düşümü (k·L·N — Basit) =====================
+# ===================== SAYFA 2: Gerilim Düşümü (k·L·N) =====================
 elif selected == "Gerilim Düşümü":
-    st.subheader("📉 Gerilim Düşümü — Basit Analiz (k·L·N)")
-    st.caption("Formül: Gerilim Düşümü (%) = k × L (m) × N (kW)")
+    st.subheader("📉 Gerilim Düşümü Analizi — k·L·N Modeli")
+    st.caption("Formül: **Gerilim Düşümü (%) = k × Hat Uzunluğu (L, m) × Yük (N, kW)**")
 
-    # --- Minimal kontroller
-    col = st.columns(3)
-    with col[0]:
-        k_const = st.number_input("k sabiti", min_value=0.0, max_value=1.0, value=0.0001, step=0.0001, format="%.6f")
-    with col[1]:
-        mode = st.radio("Değişken", ["L'ye göre", "N'ye göre"], horizontal=True)
-    with col[2]:
-        thr = st.number_input("Eşik (%)", min_value=0.0, max_value=100.0, value=5.0, step=0.5, format="%.2f")
+    with st.expander("Bu sayfa ne yapıyor?", expanded=True):
+        st.markdown("""
+- **Amaç:** L ve N değişince gerilim düşümünün nasıl davrandığını **tek bakışta** gösterir.
+- **Eşik testi:** Girilen eşiğe göre **uygun/uygunsuz** durumunu sayı ve grafikle özetler.
+- **A/B Senaryo:** *A = mevcut durum*, *B = önerilen tasarım* gibi iki farklı **durumu** karşılaştırır (bu trafo A/B değil).
+        """)
+
+    # --- Parametreler
+    with st.sidebar.expander("🔧 Parametreler", expanded=True):
+        k_const = st.number_input("k sabiti", 0.0, 1.0, 0.0001, 0.0001, key="gd_k")
+        thr_pct = st.number_input("Eşik (Gerilim Düşümü, %)", 0.5, 20.0, 5.0, 0.5, key="gd_thr")
+
+        # Kesit grafikleri için sabit değerler
+        P_fixed = st.slider("Sabit N (kW) — L'ye karşı eğri", 1, 1000, 150, 1)
+        L_fixed = st.slider("Sabit L (m) — N'e karşı eğri", 10, 5000, 600, 10)
+
+    # --- Yardımcı: formül
+    def vdrop_kLN(L_m: float, P_kw: float, k: float) -> float:
+        try:
+            return float(k) * float(L_m) * float(P_kw)
+        except Exception:
+            return float("nan")
+
+    # ========= Kesit grafikleri (ısı haritası yok) =========
+    st.markdown("### 📈 Kesit Grafikleri (Eşik çizgili)")
+
+    # (1) Sabit N'de, L'ye karşı
+    Ls = np.linspace(10, 5000, 150)
+    dv_L = k_const * Ls * P_fixed
+    fig_L = px.line(x=Ls, y=dv_L, markers=True, template="plotly_white",
+                    title=f"Gerilim Düşümü (%) — Sabit Yük: {P_fixed} kW (L'ye karşı)")
+    fig_L.add_hline(y=thr_pct, line_dash="dot", annotation_text=f"Eşik %{thr_pct:.2f}")
+    fig_L.update_layout(xaxis_title="Hat Uzunluğu L (m)", yaxis_title="Gerilim Düşümü (%)")
+
+    # Eşik altında kalmak için max L
+    L_max = (thr_pct / (k_const * P_fixed)) if k_const > 0 and P_fixed > 0 else np.inf
+    L_txt = f"{L_max:.0f} m" if np.isfinite(L_max) else "∞"
+    st.caption(f"**Sabit N={P_fixed} kW** için **eşik altında kalmak** istiyorsan: **L ≤ {L_txt}**")
+
+    # (2) Sabit L'de, N'e karşı
+    Ns = np.linspace(1, 1000, 150)
+    dv_N = k_const * L_fixed * Ns
+    fig_N = px.line(x=Ns, y=dv_N, markers=True, template="plotly_white",
+                    title=f"Gerilim Düşümü (%) — Sabit Hat Uzunluğu: {L_fixed} m (N'e karşı)")
+    fig_N.add_hline(y=thr_pct, line_dash="dot", annotation_text=f"Eşik %{thr_pct:.2f}")
+    fig_N.update_layout(xaxis_title="Yük N (kW)", yaxis_title="Gerilim Düşümü (%)")
+
+    # Eşik altında kalmak için max N
+    N_max = (thr_pct / (k_const * L_fixed)) if k_const > 0 and L_fixed > 0 else np.inf
+    N_txt = f"{N_max:.0f} kW" if np.isfinite(N_max) else "∞"
+    st.caption(f"**Sabit L={L_fixed} m** için **eşik altında kalmak** istiyorsan: **N ≤ {N_txt}**")
+
+    c1, c2 = st.columns(2)
+    c1.plotly_chart(fig_L, use_container_width=True)
+    c2.plotly_chart(fig_N, use_container_width=True)
 
     st.divider()
 
-    # --- Tek grafik: sade, okunaklı
-    if mode == "L'ye göre":
-        # N sabit; L değişir
-        N_fix = st.slider("Sabit Yük N (kW)", 1, 1000, 150, 1)
-        Ls = np.linspace(0, 3000, 200)
-        dv = k_const * Ls * N_fix
-        fig = px.line(x=Ls, y=dv, template="plotly_white", labels={"x":"Hat Uzunluğu L (m)", "y":"Gerilim Düşümü (%)"})
-        fig.update_traces(mode="lines+markers", marker=dict(size=5))
-        # eşik üstünü hafif boyama
-        fig.add_hrect(y0=thr, y1=max(dv.max(), thr), opacity=0.15, line_width=0)
-        fig.update_layout(title=f"Gerilim Düşümü — N={N_fix} kW")
-        st.plotly_chart(fig, use_container_width=True)
-        # kısa özet
-        st.metric("L (eşikte) ≈", f"{(thr/(k_const*N_fix)) if (k_const*N_fix)>0 else 0:.1f} m")
+    # ========= A/B Senaryo Karşılaştırma =========
+    st.markdown("### 🥊 A/B Senaryo Karşılaştırma")
+    st.caption("**A = mevcut durum**, **B = önerilen tasarım** gibi düşün. İkisi de (L, N, k) üçlüsüyle tanımlanır.")
 
-    else:
-        # L sabit; N değişir
-        L_fix = st.slider("Sabit Hat Uzunluğu L (m)", 0, 5000, 600, 10)
-        Ns = np.linspace(0, 1000, 200)
-        dv = k_const * L_fix * Ns
-        fig = px.line(x=Ns, y=dv, template="plotly_white", labels={"x":"Yük N (kW)", "y":"Gerilim Düşümü (%)"})
-        fig.update_traces(mode="lines+markers", marker=dict(size=5))
-        fig.add_hrect(y0=thr, y1=max(dv.max(), thr), opacity=0.15, line_width=0)
-        fig.update_layout(title=f"Gerilim Düşümü — L={L_fix} m")
-        st.plotly_chart(fig, use_container_width=True)
-        st.metric("N (eşikte) ≈", f"{(thr/(k_const*L_fix)) if (k_const*L_fix)>0 else 0:.1f} kW")
+    colA = st.columns(3)
+    with colA[0]:
+        name_A = st.text_input("Senaryo A adı", "Mevcut")
+    with colA[1]:
+        L_A = st.number_input("A — L (m)", 10, 10000, 600, 10)
+    with colA[2]:
+        N_A = st.number_input("A — N (kW)", 1, 5000, 200, 1)
 
-    # Not: tek grafiğe odaklandık; gereksiz ısı haritası/çoklu grafikler kaldırıldı.
+    colB = st.columns(3)
+    with colB[0]:
+        name_B = st.text_input("Senaryo B adı", "Öneri")
+    with colB[1]:
+        L_B = st.number_input("B — L (m)", 10, 10000, 400, 10)
+    with colB[2]:
+        N_B = st.number_input("B — N (kW)", 1, 5000, 120, 1)
+
+    # k sabitini A/B için ayrı ayrı denemek istersen:
+    c_k1, c_k2 = st.columns(2)
+    with c_k1:
+        k_A = st.number_input("A — k", 0.0, 1.0, float(k_const), 0.0001)
+    with c_k2:
+        k_B = st.number_input("B — k", 0.0, 1.0, float(k_const), 0.0001)
+
+    dv_A = vdrop_kLN(L_A, N_A, k_A)
+    dv_B = vdrop_kLN(L_B, N_B, k_B)
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric(f"{name_A} — Gerilim Düşümü", f"%{dv_A:.2f}")
+    m2.metric(f"{name_B} — Gerilim Düşümü", f"%{dv_B:.2f}")
+    m3.metric("Eşik", f"%{thr_pct:.2f}")
+    karar = (f"{name_A} daha kötü" if dv_A > dv_B else
+             f"{name_B} daha kötü" if dv_B > dv_A else "Eşit")
+    m4.metric("Karar", karar)
+
+    comp_df = pd.DataFrame({
+        "Senaryo": [name_A, name_B],
+        "Gerilim Düşümü (%)": [dv_A, dv_B],
+        "Durum": ["Uygun" if dv_A <= thr_pct else "Uygunsuz",
+                  "Uygun" if dv_B <= thr_pct else "Uygunsuz"],
+    })
+    fig_bar = px.bar(comp_df, x="Senaryo", y="Gerilim Düşümü (%)", text_auto=True, color="Durum",
+                     template="plotly_white", title="A/B Karşılaştırma")
+    fig_bar.add_hline(y=thr_pct, line_dash="dot", annotation_text=f"Eşik %{thr_pct:.2f}")
+    st.plotly_chart(fig_bar, use_container_width=True)
+
+    st.info("A/B’nin olayı: **iki farklı tasarım/durum**un (L, N, k) gerilim düşümlerini doğrudan kıyaslamak. Bu trafo A/B değil.")
+
 
 # ===================== SAYFA 3: Forecasting =====================
 elif selected == "Forecasting":
