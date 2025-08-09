@@ -10,7 +10,7 @@ from geopy.distance import geodesic
 import plotly.express as px
 from sklearn.ensemble import IsolationForest
 
-# --- Opsiyonel hızlandırıcılar (varsa kullanılır) ---
+# --- Opsiyonel hızlandırıcılar ---
 try:
     from pyproj import Transformer
     HAS_PYPROJ = True
@@ -46,7 +46,7 @@ selected = option_menu(
 def load_data():
     direk_df = pd.read_excel("Direk Sorgu Sonuçları.xlsx")
     trafo_df = pd.read_excel("Trafo Sorgu Sonuçları.xlsx")
-    ext_df   = pd.read_csv("smart_grid_dataset.csv")  # diğer sayfalarda opsiyonel kullanılır
+    ext_df   = pd.read_csv("smart_grid_dataset.csv")  
     return direk_df, trafo_df, ext_df
 
 direk_df, trafo_df, ext_df = load_data()
@@ -190,7 +190,7 @@ if selected == "Talep Girdisi":
             float(map_data["last_clicked"]["lng"]),
         )
     if st.session_state["demand_point"] is None:
-        st.info("📍 Haritadan bir noktaya tıkla."); st.stop()
+        st.info("📍 Haritadan bir talep noktası belirleyiniz."); st.stop()
 
     new_lat, new_lon = st.session_state["demand_point"]
     st.success(f"Yeni talep noktası: ({new_lat:.6f}, {new_lon:.6f})")
@@ -309,7 +309,7 @@ if selected == "Talep Girdisi":
         if dv_val > drop_threshold_pct:
             st.error("⚠️ Mevcut trafo gücü 400 kVA üzerinde ve gerilim düşümü eşiği aşılıyor — **ek trafo gerekebilir**.")
         else:
-            st.warning("ℹ️ Mevcut trafo gücü 400 kVA üzerinde — **ek trafo gerekebilir** (saha kontrolü önerilir).")
+            st.warning("ℹ️ Mevcut trafo gücü 400 kVA üzerinde — **ek trafo gerekebilir**.")
 
     st.subheader("📡 Oluşturulan Şebeke Hattı")
     st_folium(m2, height=620, width="100%", key="result_map_basic")
