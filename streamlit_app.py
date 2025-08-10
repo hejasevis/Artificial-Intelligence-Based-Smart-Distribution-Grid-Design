@@ -492,43 +492,7 @@ elif selected == "Gerilim Düşümü":
 
     st.divider()
 
-    # ================== Trafo bazlı basit karşılaştırma (5–15 direk, %15 clip) ==================
-    st.markdown("### 🔌 Trafo Seçin")
-
-    trafo_names = trafo_df["Montaj Yeri"].dropna().astype(str).unique().tolist()
-    if len(trafo_names) == 0:
-        st.info("Trafo verisi yok."); st.stop()
-
-    trafo_sel = st.selectbox("Trafo", options=trafo_names)
-
-    # Seçilen trafo konumu
-    trow = trafo_df[trafo_df["Montaj Yeri"].astype(str) == trafo_sel].iloc[0]
-    t_coord = (float(trow["Enlem"]), float(trow["Boylam"]))
-
-    # Direk verisi → bu trafoya en yakın direkleri seç
-    dloc = direk_df.dropna(subset=["Enlem", "Boylam"]).copy()
-    if len(dloc) == 0:
-        st.error("Direk verisi yok."); st.stop()
-
-    # Mesafe (m)
-    dloc["Mesafe (m)"] = dloc.apply(
-        lambda r: geodesic((float(r["Enlem"]), float(r["Boylam"])), t_coord).meters, axis=1
-    )
-
-    # Bu trafo için analiz edilecek direk sayısı (1-12)
-    max_n = st.slider("Bu trafo için kaç direk analiz edilsin?", 1, 12, 12, 1)
-    dloc = dloc.sort_values("Mesafe (m)").head(int(max_n)).reset_index(drop=True)
-
-    # Yük (kW) — yoksa sentetik
-    rng = np.random.default_rng(42)
-    if "Yük (kW)" in dloc.columns:
-        dloc["Yük (kW)"] = pd.to_numeric(dloc["Yük (kW)"], errors="coerce").fillna(
-            rng.integers(10, 300, size=len(dloc))
-        )
-    else:
-        dloc["Yük (kW)"] = rng.integers(10, 300, size=len(dloc))
-
-    # Gerçek (formül) ve AI tahmini
+    # --- Gerçek (formül) ve AI tahmini ---
     dloc["Gerçek (%)"] = dloc.apply(lambda r: vdrop_kLN(r["Mesafe (m)"], r["Yük (kW)"], k_in), axis=1)
     if reg is not None:
         Xb = dloc[["Mesafe (m)", "Yük (kW)"]].copy()
@@ -537,43 +501,48 @@ elif selected == "Gerilim Düşümü":
     else:
         dloc["Tahmin (%)"] = np.nan
 
-    # Maksimum %15'e clip (genel veri seti görünümü için)
-    dloc["Gerçek (%)"] = dloc["Gerçek (%)"].clip(upper=15)
-    dloc["Tahmin (%)"] = dloc["Tahmin (%)"].clip(upper=15)
+    # --- Sağlamlaştırma: [0, 15]% aralığına kırp ve NaN'leri temizle ---
+    dloc["Gerçek (%)"]  = dloc["Gerçek (%)"].clip(lower=0, upper=15)
+    dloc["Tahmin (%)"]  = dloc["Tahmin (%)"].clip(lower=0, upper=15)
 
-    # Performans metrikleri (clip sonrası)
+    # Etiket: Direk Kodu varsa onu kullan; yoksa D1..DN üret
+    if "Direk Kodu" in dloc.columns:
+        etiket = dloc["Direk Kodu"].astype(str).fillna("").str.strip()
+        fallback = [f"D{i+1}" for i in range(len(dloc))]
+        etiket = np.where((etiket == "") | (etiket == "nan") | (etiket.str.lower() == "none"),
+                          fallback, etiket)
+        dloc["Etiket"] = etiket
+    else:
+        dloc["Etiket"] = [f"D{i+1}" for i in range(len(dloc))]
+
+    # --- Performans metrikleri (küçük örnek boyutlarına tolerans) ---
     valid = dloc[["Gerçek (%)", "Tahmin (%)"]].dropna()
-    if len(valid) >= 5:
-        from sklearn.metrics import r2_score, mean_squared_error
-        r2 = r2_score(valid["Gerçek (%)"], valid["Tahmin (%)"])
+    r2 = mse = np.nan
+    if len(valid) >= 1:
+        from sklearn.metrics import mean_squared_error, r2_score
         mse = mean_squared_error(valid["Gerçek (%)"], valid["Tahmin (%)"])
-    else:
-        r2 = mse = float("nan")
+        if len(valid) >= 2:
+            r2 = r2_score(valid["Gerçek (%)"], valid["Tahmin (%)"])
 
-    cA, cB, cC = st.columns(3)
-    cA.metric("R²", f"{r2:.3f}" if np.isfinite(r2) else "—")
-    cB.metric("MSE", f"{mse:.4f}" if np.isfinite(mse) else "—")
-    cC.metric("Direk sayısı", f"{len(dloc)}")
-
-    # X ekseni etiketi: Direk Kodu varsa onu kullan, yoksa index
-    if "Direk Kodu" in dloc.columns and dloc["Direk Kodu"].notna().any():
-        dloc["Etiket"] = dloc["Direk Kodu"].astype(str)
-    else:
-        dloc["Etiket"] = (dloc.index + 1).astype(str)  # 1..N
-
-    # Çizgi grafik: Gerçek vs Tahmin (tek eksen, sade)
+    # --- Grafik: Gerçek vs Tahmin (NaN satırlarını at) ---
+    plot_df = dloc.dropna(subset=["Gerçek (%)", "Tahmin (%)"])[["Etiket", "Gerçek (%)", "Tahmin (%)"]]
     import plotly.express as px
-    plot_df = dloc[["Etiket", "Gerçek (%)", "Tahmin (%)"]].melt(
-        id_vars="Etiket", var_name="Değişken", value_name="Gerilim Düşümü (%)"
-    )
     fig_cmp = px.line(
-        plot_df, x="Etiket", y="Gerilim Düşümü (%)", color="Değişken",
+        plot_df.melt(id_vars="Etiket", var_name="Değişken", value_name="Gerilim Düşümü (%)"),
+        x="Etiket", y="Gerilim Düşümü (%)", color="Değişken",
         markers=True, template="plotly_white",
-        title=f"{trafo_sel} — Gerilim Düşümü (Hesaplama vs AI)"
+        title=f"{trafo_sel} — Gerilim Düşümü (Formül vs AI)"
     )
     fig_cmp.add_hline(y=thr_pct, line_dash="dot", annotation_text=f"Eşik %{thr_pct:.2f}")
     fig_cmp.update_layout(xaxis_title="Direk", yaxis_title="Gerilim Düşümü (%)")
     st.plotly_chart(fig_cmp, use_container_width=True)
+
+    # --- Metrikleri grafiğin ALTINA yaz ---
+    st.caption(
+        f"**R²:** {('—' if not np.isfinite(r2) else f'{r2:.3f}')}  |  "
+        f"**MSE:** {('—' if not np.isfinite(mse) else f'{mse:.4f}')}  |  "
+        f"**Direk sayısı:** {len(plot_df)}"
+    )
 
     
 
