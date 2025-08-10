@@ -628,135 +628,32 @@ elif selected == "Forecasting":
         cM3.metric("MAPE", f"%{mape:,.2f}" if np.isfinite(mape) else "—")
         cM4.metric("RMSE%", f"%{rmsep:,.2f}" if np.isfinite(rmsep) else "—")
 
-# ===================== SAYFA 4: Arıza / Anomali Tespiti =====================
-elif selected == "Arıza/Anomali":
-    st.subheader("🚨 Arıza & Anomali Tespiti — IsolationForest")
-
-    # --------- Girdiler (sayfa içi) ---------
-    c1, c2, c3, c4 = st.columns([1,1,1,1])
-    with c1:
-        agg = st.selectbox("Zaman toplaması", ["Günlük Ortalama", "Günlük Toplam"], index=0)
-    with c2:
-        holdout_days = st.number_input("Test penceresi (gün)", 7, 120, 30, 1)
-    with c3:
-        contam = st.number_input("Anomali oranı (contamination)", 0.001, 0.20, 0.03, 0.001)
-    with c4:
-        win = st.number_input("Rolling pencere (gün)", 3, 60, 7, 1)
-
-    # --------- Veri kontrol ---------
-    if ext_df is None or ext_df.empty:
-        st.error("smart_grid_dataset.csv bulunamadı/boş."); st.stop()
-
-    # timestamp / load kw kolonlarını bul
-    cols_lower = {c.lower(): c for c in ext_df.columns}
-    time_col = next((cols_lower[k] for k in ["timestamp","datetime","date","tarih","ds"] if k in cols_lower), None)
-    load_col = next((cols_lower[k] for k in ["load_kw","load","power_kw","kw","value","y"] if k in cols_lower), None)
-
-    if time_col is None:
-        for c in ext_df.columns:
-            if pd.to_datetime(ext_df[c], errors="coerce").notna().mean() > 0.6:
-                time_col = c; break
-    if load_col is None:
-        numc = [c for c in ext_df.columns if pd.api.types.is_numeric_dtype(ext_df[c])]
-        load_col = numc[0] if numc else None
-
-    if time_col is None or load_col is None:
-        st.error("CSV’de zaman ve yük kolonu bulunamadı."); st.stop()
-
-    df = ext_df[[time_col, load_col]].rename(columns={time_col:"ds", load_col:"y"}).copy()
-    df["ds"] = pd.to_datetime(df["ds"], errors="coerce")
-    df["y"]  = pd.to_numeric(df["y"], errors="coerce")
-    df = df.dropna(subset=["ds","y"]).sort_values("ds")
-
-    # --------- Günlük toplama ---------
-    if "Ortalama" in agg:
-        s = df.set_index("ds")["y"].resample("D").mean().interpolate("time")
+# ---- Anomali listesi expander (değişmedi) ----
+with st.expander("📜 Anomali Listesi"):
+    if anom > 0:
+        for _, r in outl.sort_values("ds").iterrows():
+            st.markdown(
+                f"- {r['ds'].strftime('%Y-%m-%d')}: **y={r['y']:.3f} kW** — {r['tip']} "
+                f"(score={r['score']:.4f})"
+            )
     else:
-        s = df.set_index("ds")["y"].resample("D").sum().interpolate("time")
+        st.info("Anomali bulunamadı.")
 
-    ts = s.reset_index().rename(columns={"index":"ds"})
-    if len(ts) <= holdout_days + 30:
-        st.error("Zaman serisi kısa. Test penceresini küçült veya veri aralığını artır."); st.stop()
+# ---- Parametreler: ilk ekrandaki gibi KONTROL görünümü ama sabit/disable ----
+with st.expander("⚙️ Kullanılan Parametreler (Sabit)"):
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.selectbox("Zaman toplaması", ["Günlük Ortalama"], index=0, disabled=True)
+    with c2:
+        st.number_input("Test penceresi (gün)", min_value=1, max_value=365,
+                        value=HOLDOUT, step=1, disabled=True)
+    with c3:
+        st.number_input("Anomali oranı (contamination)", min_value=0.0, max_value=1.0,
+                        value=float(CONTAM), step=0.01, format="%.2f", disabled=True)
+    with c4:
+        st.number_input("Rolling pencere (gün)", min_value=1, max_value=365,
+                        value=ROLL_WIN, step=1, disabled=True)
 
-    # --------- Özellik mühendisliği ---------
-    ts["lag1"] = ts["y"].shift(1)
-    ts["lag2"] = ts["y"].shift(2)
-    ts["lag3"] = ts["y"].shift(3)
-    ts["diff1"] = ts["y"].diff(1)
-    ts["pct1"]  = ts["y"].pct_change(1).replace([np.inf, -np.inf], np.nan)
-    ts["roll_mean"] = ts["y"].rolling(win, min_periods=1).mean()
-    ts["roll_std"]  = ts["y"].rolling(win, min_periods=1).std().fillna(0.0)
-    feats = ["y","lag1","lag2","lag3","diff1","pct1","roll_mean","roll_std"]
-    ts_feats = ts.dropna(subset=["lag3"]).copy()  # ilk 3 gün düşer
-
-    # Train/Test böl
-    cutoff = ts_feats["ds"].max() - pd.Timedelta(days=int(holdout_days))
-    train = ts_feats[ts_feats["ds"] <= cutoff].copy()
-    test  = ts_feats[ts_feats["ds"] >  cutoff].copy()
-    if len(train) < 20 or len(test) < 5:
-        st.error("Eğitim/test için yeterli veri yok. Pencere/holdout parametrelerini değiştirin."); st.stop()
-
-    # --------- Model ---------
-    from sklearn.ensemble import IsolationForest
-    iso = IsolationForest(n_estimators=300, contamination=float(contam), random_state=7)
-    iso.fit(train[feats])
-
-    # Skorlar (negatif değerler daha anomali)
-    ts_feats["score"] = iso.decision_function(ts_feats[feats])  # büyük = normal, küçük = anomali
-    ts_feats["pred"]  = iso.predict(ts_feats[feats])            # 1 normal, -1 anomali
-    ts_feats["anomaly"] = (ts_feats["pred"] == -1).astype(int)
-
-    # --------- Basit arıza tip sınıflama (heuristic) ---------
-    def fault_type(row):
-        if row["anomaly"] != 1:
-            return "Normal"
-        # spike/drop/flat heuristics
-        if row["diff1"] > 2.5 * ts_feats["roll_std"].median():
-            return "Ani Artış (Spike)"
-        if row["diff1"] < -2.5 * ts_feats["roll_std"].median():
-            return "Ani Düşüş (Drop)"
-        if abs(row["roll_std"]) < 1e-6:
-            return "Düz Çizgi (Flatline)"
-        return "Aykırı"
-
-    ts_feats["tip"] = ts_feats.apply(fault_type, axis=1)
-
-    # --------- Özet metrikler ---------
-    total = len(ts_feats)
-    anom  = int(ts_feats["anomaly"].sum())
-    rate  = (anom / total) * 100.0
-
-    k1, k2, k3 = st.columns(3)
-    k1.metric("Toplam Kayıt", f"{total}")
-    k2.metric("Anomali Sayısı", f"{anom}")
-    k3.metric("Anomali Oranı", f"%{rate:.2f}")
-
-    st.divider()
-
-    # --------- Grafik ---------
-    import plotly.graph_objects as go
-    base = ts_feats[ts_feats["anomaly"] == 0]
-    outl = ts_feats[ts_feats["anomaly"] == 1]
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=base["ds"], y=base["y"], mode="lines", name="Seri (Normal)"))
-    fig.add_trace(go.Scatter(x=outl["ds"], y=outl["y"], mode="markers", name="Anomali",
-                             marker=dict(size=9, symbol="x")))
-    fig.update_layout(template="plotly_white",
-                      title="Zaman Serisi ve Tespit Edilen Anomaliler",
-                      xaxis_title="Tarih", yaxis_title="kW")
-    st.plotly_chart(fig, use_container_width=True)
-
-    # --------- Anomali tablosu + indir ---------
-    anomalies = ts_feats[ts_feats["anomaly"] == 1][["ds","y","score","diff1","pct1","tip"]].sort_values("ds")
-    st.markdown("#### 🧾 Anomaliler")
-    st.dataframe(anomalies, use_container_width=True)
-    st.download_button(
-        "📥 Anomalileri CSV olarak indir",
-        data=anomalies.to_csv(index=False).encode("utf-8"),
-        file_name="anomalies.csv",
-        mime="text/csv"
-    )
-
-    with st.expander("⚙️ Kullanılan Özellikler"):
-        st.code(", ".join(feats))
+    # İstersen bilgi amaçlı feature listesi de dursun:
+    st.caption("Kullanılan özellikler")
+    st.code(", ".join(feats), language="text")
