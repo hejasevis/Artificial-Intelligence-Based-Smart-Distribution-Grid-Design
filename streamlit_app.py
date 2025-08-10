@@ -157,115 +157,84 @@ def build_route_and_stats(demand_latlon, trafo_latlon, poles_latlon, max_span=40
 # ===================== SAYFA 1: Talep Girdisi =====================
 if selected == "Talep Girdisi":
     st.sidebar.header("⚙️ Hat Parametreleri")
-    max_span    = st.sidebar.number_input("Maks. direk aralığı (m)", 20, 200, 40, 5)
-    snap_radius = st.sidebar.number_input("Mevcut direğe snap yarıçapı (m)", 2, 100, 20, 1)
+    max_span     = st.sidebar.number_input("Maks. direk aralığı (m)", 20, 120, 40, 5)
+    snap_radius  = st.sidebar.number_input("Mevcut direğe snap yarıçapı (m)", 5, 120, 30, 5)
 
     with st.sidebar.expander("🔌 Elektrik Parametreleri"):
-        k_const = st.number_input("k sabiti", 0.0, 1.0, 0.0001, 0.0001, help="Fiziksel modele göre ayarla.")
-        drop_threshold_pct = st.number_input("Gerilim düşümü eşiği (%)", 1.0, 30.0, 6.0, 0.5)
+        k_const = st.number_input("k sabiti", 0.0, 1.0, 0.0001, 0.0001)
+        drop_threshold_pct = st.number_input("Gerilim düşümü eşiği (%)", 1.0, 15.0, 5.0, 0.5)
 
-    st.subheader("📍 Talep Noktasını Seç (Harita)")
-    center_lat = float(direk_clean["Enlem"].astype(float).mean())
-    center_lon = float(direk_clean["Boylam"].astype(float).mean())
+    st.subheader("📍 Talep Noktasını Seçin (Harita)")
+    center_lat = float(direk_clean["Enlem"].mean())
+    center_lon = float(direk_clean["Boylam"].mean())
     m = folium.Map(location=[center_lat, center_lon], zoom_start=16, control_scale=True)
 
-    # katmanlar
     poles_group = folium.FeatureGroup(name="Direkler (Mevcut)", show=True)
     trafos_group = folium.FeatureGroup(name="Trafolar", show=True)
 
     for _, r in direk_clean.iterrows():
-        folium.CircleMarker(
-            [float(r["Enlem"]), float(r["Boylam"])],
-            radius=4, color="blue", fill=True, fill_opacity=0.7,
-            tooltip=f"Direk: {r.get('Direk Kodu', '')}"
-        ).add_to(poles_group)
+        folium.CircleMarker([r["Enlem"], r["Boylam"]], radius=4, color="blue",
+                            fill=True, fill_opacity=0.7,
+                            tooltip=f"Direk: {r['Direk Kodu']}").add_to(poles_group)
 
     for _, r in trafo_clean.iterrows():
-        folium.Marker(
-            [float(r["Enlem"]), float(r["Boylam"])],
-            tooltip=f"Trafo: {r.get('Montaj Yeri','')}",
-            icon=folium.Icon(color="orange", icon="bolt", prefix="fa")
-        ).add_to(trafos_group)
+        folium.Marker([r["Enlem"], r["Boylam"]],
+                      tooltip=f"Trafo: {r['Montaj Yeri']}",
+                      icon=folium.Icon(color="orange", icon="bolt", prefix="fa")).add_to(trafos_group)
 
     poles_group.add_to(m); trafos_group.add_to(m)
     folium.LayerControl(collapsed=False).add_to(m)
     m.add_child(folium.LatLngPopup())
-
-    map_pick = st_folium(m, height=600, width="100%", returned_objects=["last_clicked"], key="select_map_pg1")
+    map_data = st_folium(m, height=620, width="100%", returned_objects=["last_clicked"], key="select_map_basic")
 
     if "demand_point" not in st.session_state:
         st.session_state["demand_point"] = None
-
-    if map_pick and map_pick.get("last_clicked"):
+    if map_data and map_data.get("last_clicked"):
         st.session_state["demand_point"] = (
-            float(map_pick["last_clicked"]["lat"]),
-            float(map_pick["last_clicked"]["lng"]),
+            float(map_data["last_clicked"]["lat"]),
+            float(map_data["last_clicked"]["lng"]),
         )
-
     if st.session_state["demand_point"] is None:
-        st.info("📍 Haritadan bir talep noktası seç.")
-        st.stop()
+        st.info("📍 Haritadan bir talep noktası seçiniz."); st.stop()
 
     new_lat, new_lon = st.session_state["demand_point"]
-    st.success(f"Seçilen talep noktası: ({new_lat:.6f}, {new_lon:.6f})")
+    st.success(f"Yeni talep noktası: ({new_lat:.6f}, {new_lon:.6f})")
 
     st.subheader("⚡ Talep Edilen Yük (kW)")
-    user_kw = st.slider("Talep gücü", 1, 1000, 120, 5, key="kw_slider_pg1")
+    user_kw = st.slider("Talep edilen güç", 1, 500, 120, 5, key="kw_slider_basic")
 
-    # --- Trafo adayları: en yakın 8 ---
-    trafo_clean["_dist"] = trafo_clean.apply(
-        lambda r: geodesic((new_lat, new_lon), (float(r["Enlem"]), float(r["Boylam"]))).meters, axis=1
-    )
-    near8 = trafo_clean.sort_values("_dist").head(8)
-
-    def eval_candidate(row):
+    # Trafo adayları: en yakın 8 → rota üret → k·L·N ile düşüm hesapla
+    def eval_trafo(row):
         t_latlon = (float(row["Enlem"]), float(row["Boylam"]))
         poles_latlon = list(zip(direk_clean["Enlem"].astype(float), direk_clean["Boylam"].astype(float)))
-<<<<<<< HEAD
-        route, Lm, used_exist, proposed_new, spans = build_route_and_stats(
-            (new_lat, new_lon), t_latlon, poles_latlon,
-            max_span=float(max_span), snap_radius=float(snap_radius)
-        )
-        dv = vdrop_kLN(Lm, float(user_kw), float(k_const))
-        out = {
-            "Montaj Yeri": row.get("Montaj Yeri", ""),
-            "Gücü[kVA]": float(row.get("Gücü[kVA]", np.nan)),
-=======
-        route, Lm, used, prop, spans = build_route_and_stats(
-            (new_lat, new_lon), t_latlon, poles_latlon,
-            max_span=float(max_span), snap_radius=float(snap_radius)
-        )
-        dv = vdrop_kLN(Lm, float(user_kw), float(k_const))
+        route, Lm, used, prop, spans = build_route_and_stats((new_lat, new_lon), t_latlon, poles_latlon,
+                                                             max_span=max_span, snap_radius=snap_radius)
+        dv = vdrop_kLN(Lm, user_kw, k_const)  # k·L·N
+        cap_ok = False
+        try:
+            kva = float(row["Gücü[kVA]"])
+            cap_ok = (kva * 0.8) >= user_kw  # pf=0.8
+        except Exception:
+            pass
         return {
             "Montaj Yeri": row["Montaj Yeri"],
             "Gücü[kVA]": row["Gücü[kVA]"],
->>>>>>> e9872d5fc16bb8152b640d54806740e6220f97f3
             "lat": t_latlon[0], "lon": t_latlon[1],
-<<<<<<< HEAD
-            "route": route, "L_m": float(Lm),
-            "Kullanılan Direk": int(used_exist), "Yeni Direk": int(proposed_new),
-            "Gerilim Düşümü (%)": float(np.clip(dv, 0, 1000)) if np.isfinite(dv) else np.nan,
-            "Kapasite Uygun": (float(row.get("Gücü[kVA]", 0.0)) * 0.8) >= float(user_kw)
-=======
-            "route": route, "L_m": Lm, "Kullanılan Direk": used, "Yeni Direk": prop,
-            "Gerilim Düşümü (%)": np.clip(dv, 0, 15) if np.isfinite(dv) else np.nan,
-            "Kapasite Uygun": (float(row["Gücü[kVA]"]) * 0.8) >= float(user_kw)
->>>>>>> e9872d5fc16bb8152b640d54806740e6220f97f3
+            "route": route, "L_m": Lm,
+            "Gerilim Düşümü (%)": dv, "Kapasite Uygun": cap_ok,
+            "Kullanılan Direk": used, "Yeni Direk": prop
         }
-        return out
 
-<<<<<<< HEAD
-    cand = [eval_candidate(r) for _, r in near8.iterrows()]
-    cand_df = pd.DataFrame(cand).sort_values(["Gerilim Düşümü (%)", "L_m"]).reset_index(drop=True)
-=======
-    # En yakın 8 trafo
-    trafo_clean["_dist"] = trafo_clean.apply(
+    trafo_local = trafo_clean.copy()
+    trafo_local["geo_dist"] = trafo_local.apply(
         lambda r: geodesic((new_lat, new_lon), (float(r["Enlem"]), float(r["Boylam"]))).meters, axis=1
     )
-    near8 = trafo_clean.sort_values("_dist").head(8)
-    cand = [eval_trafo(r) for _, r in near8.iterrows()]
-    cand_df = pd.DataFrame(cand).sort_values(["Gerilim Düşümü (%)", "L_m"]).reset_index(drop=True)
->>>>>>> e9872d5fc16bb8152b640d54806740e6220f97f3
+    topN = trafo_local.sort_values("geo_dist").head(8)
+    evals = [eval_trafo(r) for _, r in topN.iterrows()]
+    cand_df = pd.DataFrame(evals).sort_values(
+        by=["Kapasite Uygun", "Gerilim Düşümü (%)", "Yeni Direk", "L_m"],
+        ascending=[False, True, True, True]
+    )
 
     with st.expander("📈 En Uygun Trafo Adayları"):
         st.dataframe(
@@ -275,190 +244,85 @@ if selected == "Talep Girdisi":
 
     best = cand_df.iloc[0]
 
-    # --- Sonuç haritası (+ manuel çizim) ---
-    manual_route = st.checkbox("Manuel hat çizeceğim", value=False)
-
+    # Sonuç haritası
     m2 = folium.Map(location=[new_lat, new_lon], zoom_start=16, control_scale=True)
 
-    # mevcut direkler & trafolar
+    # Mevcut direkler (mavi)
     for _, r in direk_clean.iterrows():
-        folium.CircleMarker(
-            [float(r["Enlem"]), float(r["Boylam"])],
-            radius=4, color="blue", fill=True, fill_opacity=0.7,
-            tooltip=f"Direk: {r.get('Direk Kodu','')}"
-        ).add_to(m2)
+        folium.CircleMarker([r["Enlem"], r["Boylam"]], radius=4, color="blue",
+                            fill=True, fill_opacity=0.7,
+                            tooltip=f"Direk: {r['Direk Kodu']}").add_to(m2)
 
+    # Trafolar (turuncu)
     for _, r in trafo_clean.iterrows():
-        folium.Marker(
-            [float(r["Enlem"]), float(r["Boylam"])],
-            tooltip=f"Trafo: {r.get('Montaj Yeri','')}",
-            icon=folium.Icon(color="orange", icon="bolt", prefix="fa")
-        ).add_to(m2)
+        folium.Marker([r["Enlem"], r["Boylam"]],
+                      tooltip=f"Trafo: {r['Montaj Yeri']}",
+                      icon=folium.Icon(color="orange", icon="bolt", prefix="fa")).add_to(m2)
 
+    # Talep & seçilen trafo
     folium.Marker((new_lat, new_lon), icon=folium.Icon(color="red"), tooltip="Talep Noktası").add_to(m2)
     folium.Marker((best["lat"], best["lon"]), icon=folium.Icon(color="orange", icon="bolt", prefix="fa"),
                   tooltip="Seçilen Trafo").add_to(m2)
 
-<<<<<<< HEAD
-    if manual_route:
-        Draw(
-            export=False, position='topleft',
-            draw_options={"polyline": True, "polygon": False, "rectangle": False,
-                          "circle": False, "circlemarker": False, "marker": False},
-            edit_options={"edit": True, "remove": True},
-        ).add_to(m2)
-
-    map_out = st_folium(
-        m2, height=620, width="100%",
-        returned_objects=["last_drawn_feature", "all_drawings"], key="result_map_pg1"
-    )
-
-    # --- Rota seçimi: manuel varsa onu kullan, yoksa otomatik en iyi rota ---
-    route_to_use = list(best["route"]) if isinstance(best["route"], (list, tuple)) else []
-    if manual_route:
-        feat = map_out.get("last_drawn_feature")
-        if not feat and map_out.get("all_drawings"):
-            for f in map_out["all_drawings"][::-1]:
-                if f and f.get("geometry", {}).get("type") == "LineString":
-                    feat = f; break
-        if feat and feat.get("geometry", {}).get("type") == "LineString":
-            coords = feat["geometry"]["coordinates"]  # [ [lon,lat], ... ]
-            route_to_use = [(lat, lon) for lon, lat in coords]
-
-    if not route_to_use or len(route_to_use) < 2:
-        st.warning("Hat noktaları bulunamadı. Manuel çizim için polyline çizin veya otomatik rota bekleyin.")
-        st.stop()
-
-    # --- Rota çiz, uzunluk hesapla (manuel ise yeniden) ---
-    L_m = float(best["L_m"])
-    if manual_route:
-        L_m = float(polyline_length_m(route_to_use))
-
-    folium.PolyLine(route_to_use, color="green", weight=4, opacity=0.9,
-                    tooltip=f"Hat uzunluğu ≈ {L_m:.1f} m").add_to(m2)
-
-    # --- Toleranslı snapping ile rota üstü noktaları sınıflandır ---
-=======
-    # Rota üzerinde mevcut (mavi) / yeni (mor) direkler — TOLERANSLI (KDTree)
->>>>>>> e9872d5fc16bb8152b640d54806740e6220f97f3
+    # Rota üzerinde mevcut (mavi) / yeni (mor) direkler
     try:
-<<<<<<< HEAD
-        if HAS_PYPROJ:
-            tr = to_xy_transformer()
-            poles_xy = to_xy_batch(
-                direk_clean["Boylam"].astype(float).to_numpy(),
-                direk_clean["Enlem"].astype(float).to_numpy(),
-                tr
-            )
-            tree = build_kdtree(poles_xy)
-=======
         if HAS_PYPROJ and len(best["route"]) >= 2:
-            # 1) WGS84 → metre projeksiyon
             fwd = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
             to_xy = lambda lon, lat: fwd.transform(lon, lat)
-
-            # 2) Mevcut direkleri uzaysal indeksle
-            poles_xy = np.column_stack([
-                *to_xy(direk_clean["Boylam"].astype(float).to_numpy(),
-                       direk_clean["Enlem"].astype(float).to_numpy())
-            ]).T  # shape (N, 2)
-            tree = build_kdtree(poles_xy)
-
-            # 3) Rota noktalarını sorgula
-            route_xy = np.array([to_xy(lon, lat) for (lat, lon) in best["route"]])
-            tol = float(snap_radius)  # metre
-            used_idx = set()
+            poles_xy = [to_xy(lon, lat) for (lat, lon) in zip(direk_clean["Enlem"], direk_clean["Boylam"])]
+            snapped_set = set(poles_xy)
+            route_xy = [to_xy(lon, lat) for (lat, lon) in best["route"]]
             for (lat, lon), (x, y) in zip(best["route"], route_xy):
-                is_existing = False
-                if tree is not None and len(poles_xy) > 0:
-                    dist, idx = tree.query([x, y], k=1)
-                    if np.isfinite(dist) and dist <= tol:
-                        is_existing = True
-                        used_idx.add(int(idx))
-                color = "blue" if is_existing else "purple"
-                tip   = "Mevcut Direk (rota)" if is_existing else "Önerilen Yeni Direk"
-                folium.CircleMarker((lat, lon), radius=5, color=color, fill=True, fill_opacity=0.9,
-                                    tooltip=tip).add_to(m2)
+                if (x, y) in snapped_set:
+                    folium.CircleMarker((lat, lon), radius=5, color="blue", fill=True, fill_opacity=0.9,
+                                        tooltip="Mevcut Direk (rota)").add_to(m2)
+                else:
+                    folium.CircleMarker((lat, lon), radius=5, color="purple", fill=True, fill_opacity=0.9,
+                                        tooltip="Önerilen Yeni Direk").add_to(m2)
     except Exception:
         pass
->>>>>>> e9872d5fc16bb8152b640d54806740e6220f97f3
 
-            route_lons = np.array([lon for (lat, lon) in route_to_use], dtype=float)
-            route_lats = np.array([lat for (lat, lon) in route_to_use], dtype=float)
-            route_xy = to_xy_batch(route_lons, route_lats, tr)
+    if len(best["route"]) >= 2:
+        folium.PolyLine(best["route"], color="green", weight=4, opacity=0.9,
+                        tooltip=f"Hat uzunluğu ≈ {best['L_m']:.1f} m").add_to(m2)
+    else:
+        st.warning("Hat noktaları üretilemedi.")
 
-            tol = float(snap_radius)  # metre
-            used_idx = set()
-            exist_cnt = 0
-            new_cnt = 0
-
-            for (lat, lon), (x, y) in zip(route_to_use, route_xy):
-                is_existing = False
-                if tree is not None and len(poles_xy) > 0:
-                    dist, idx = tree.query([x, y], k=1)
-                    if np.isfinite(dist) and dist <= tol:
-                        is_existing = True
-                        used_idx.add(int(idx))
-
-                color = "blue" if is_existing else "purple"
-                tip   = "Mevcut Direk (rota)" if is_existing else "Önerilen Yeni Direk"
-                folium.CircleMarker(
-                    (lat, lon), radius=5, color=color, fill=True, fill_opacity=0.9, tooltip=tip
-                ).add_to(m2)
-
-                if is_existing: exist_cnt += 1
-                else: new_cnt += 1
-        else:
-            st.warning("pyproj yok: toleranslı snapping devre dışı (projeksiyon yapılamıyor).")
-            exist_cnt = int(best.get("Kullanılan Direk", 0))
-            new_cnt = int(best.get("Yeni Direk", 0))
-    except Exception as e:
-        st.warning(f"Snapping çalıştırılamadı: {e}")
-        exist_cnt = int(best.get("Kullanılan Direk", 0))
-        new_cnt = int(best.get("Yeni Direk", 0))
-
-    # --- Metrikler ---
+    # Özet metrikler
     st.subheader("🧾 Hat Özeti")
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Toplam Uzunluk", f"{L_m:.1f} m")
-    c2.metric("Kullanılan Mevcut Direk", f"{exist_cnt}")
-    c3.metric("Önerilen Yeni Direk", f"{new_cnt}")
-    avg_span = L_m / max(1, len(route_to_use) - 1)
+    c1.metric("Toplam Uzunluk", f"{best['L_m']:.1f} m")
+    c2.metric("Kullanılan Mevcut Direk", f"{int(best['Kullanılan Direk'])}")
+    c3.metric("Önerilen Yeni Direk", f"{int(best['Yeni Direk'])}")
+    avg_span = best["L_m"] / max(1, len(best["route"]) - 1)
     c4.metric("Ortalama Direk Aralığı", f"{avg_span:.1f} m")
 
-    dv_val = float(vdrop_kLN(L_m, float(user_kw), float(k_const)))
-    durum_val = dv_val <= drop_threshold_pct
-
-    b1, b2, b3 = st.columns(3)
-    b1.metric("🎯 Eşik", f"%{drop_threshold_pct:.1f}")
-    b2.metric("Durum", "✅ Uygun" if durum_val else "❌ Uygunsuz")
-    b3.metric("Gerilim Düşümü (skor/% gibi)", f"%{dv_val:.2f}")
-
+    dv_val = float(best["Gerilim Düşümü (%)"])
     try:
         best_kva = float(best["Gücü[kVA]"])
-        if best_kva > 400:
-            st.warning("ℹ️ Seçilen trafonun gücü 400 kVA üstü — kapasite planlamasını ayrıca doğrula (pf≈0.8 varsayımı).")
     except Exception:
-        pass
+        best_kva = None
 
-    # Uyarı / Onay
     if dv_val > drop_threshold_pct:
-        st.error(f"⚠️ Gerilim düşümü %{dv_val:.2f} — eşik %{drop_threshold_pct:.1f} üstünde.")
+        st.error(f"⚠️ Gerilim düşümü %{dv_val:.2f} — eşik %{drop_threshold_pct:.1f} üstü.")
     else:
         st.success(f"✅ Gerilim düşümü %{dv_val:.2f} ≤ %{drop_threshold_pct:.1f}")
 
+    if (best_kva is not None) and (best_kva > 400):
+        st.warning("ℹ️ Mevcut trafo gücü 400 kVA üzerinde — **ek trafo gerekebilir**.")
 
-<<<<<<< HEAD
-=======
     # Durum kartı (sayfa içi hesap)
     durum_val = dv_val <= drop_threshold_pct
-    c1, c2, c3 = st.columns(3)
-    c1.metric("🎯 Eşik", f"%{drop_threshold_pct:.1f}")
-    c2.metric("Durum", "✅ Uygun" if durum_val else "❌ Uygunsuz")
-    c3.metric("Seçilen Trafo", str(best["Montaj Yeri"]))
+    bg = "#0ea65d" if durum_val else "#ef4444"
+    txt = "Eşik altında — Tasarım uygun." if durum_val else "Eşik üstünde — İyileştirme gerek."
+    st.markdown(
+        f"""<div style="background:{bg};padding:16px;border-radius:14px;color:white;font-weight:600;">{txt}</div>""",
+        unsafe_allow_html=True
+    )
 
+    st.subheader("📡 Oluşturulan Şebeke Hattı")
+    st_folium(m2, height=620, width="100%", key="result_map_basic")
 
->>>>>>> e9872d5fc16bb8152b640d54806740e6220f97f3
 # ===================== SAYFA 2: Gerilim Düşümü — Gerçek Veri & AI =====================
 elif selected == "Gerilim Düşümü":
     st.subheader("📉 Gerilim Düşümü ")
@@ -728,6 +592,10 @@ elif selected == "Forecasting":
     out = fc[["ds","yhat","yhat_low","yhat_high"]].rename(
         columns={"ds":"tarih","yhat":"tahmin_kw","yhat_low":"alt","yhat_high":"üst"}
     )
+    st.download_button("📥 Tahmini CSV indir",
+                       data=out.to_csv(index=False).encode("utf-8"),
+                       file_name="forecast_prophet.csv", mime="text/csv")
+
     st.divider()
 
     # Metrikler (altta)
