@@ -591,50 +591,37 @@ elif selected == "Forecasting":
     st.subheader("📈 Yük Tahmini (Forecasting) — Günlük")
 
     # --------- Girdiler (sayfa içi) ---------
-    c1, c2, c3, c4 = st.columns([1,1,1,1])
+    c1, c2, c3, c4, c5 = st.columns([1,1,1,1,1])
     with c1:
-        horizon = st.number_input("Tahmin ufku (gün)", 7, 120, 30, 1)
+        horizon = st.number_input("Tahmin ufku (gün)", 7, 180, 30, 1)
     with c2:
         agg = st.selectbox("Zaman toplaması", ["Günlük Ortalama", "Günlük Toplam"], index=0)
     with c3:
         season = st.selectbox("Mevsimsellik", ["Haftalık (7)", "Aylık (~30)"], index=0)
     with c4:
         holdout_days = st.number_input("Test penceresi (gün)", 7, 90, 30, 1)
+    with c5:
+        model_choice = st.selectbox("Model", ["Holt-Winters", "Prophet"], index=0)
 
     season_periods = 7 if "7" in season else 30
 
-    # --------- Veri Hazırlama ---------
-    # ext_df global'den geliyor (smart_grid_dataset.csv)
-    df_raw = None
-    if ext_df is not None and len(ext_df) > 0:
-        # kolon adayları
-        cols = {c.lower(): c for c in ext_df.columns}
-        # zaman kolonu
-        time_col = None
-        for k in ["timestamp", "datetime", "date", "ds"]:
-            if k in cols:
-                time_col = cols[k]; break
-        # yük kolonu
-        load_col = None
-        for k in ["load", "y", "power_kw", "kw", "value"]:
-            if k in cols:
-                load_col = cols[k]; break
+    # --------- Veri: smart_grid_dataset.csv zorunlu ---------
+    # ext_df uygulama açılışında: pd.read_csv("smart_grid_dataset.csv")
+    if ext_df is None or len(ext_df) == 0:
+        st.error("smart_grid_dataset.csv bulunamadı veya boş.")
+        st.stop()
 
-        if time_col and load_col:
-            df_raw = ext_df[[time_col, load_col]].rename(columns={time_col:"ds", load_col:"y"}).copy()
+    # Zaman ve yük kolonlarını tespit et
+    cols = {c.lower(): c for c in ext_df.columns}
+    time_col = next((cols[k] for k in ["timestamp","datetime","date","ds"] if k in cols), None)
+    load_col = next((cols[k] for k in ["load","y","power_kw","kw","value"] if k in cols), None)
+    if time_col is None or load_col is None:
+        st.error("Dataset'te zaman (timestamp/datetime/date/ds) ve yük (load/y/power_kw/kw/value) kolonları olmalı.")
+        st.stop()
 
-    # Eğer dataset uygun değilse sentetik üret
-    if df_raw is None or len(df_raw) < 30:
-        rng = np.random.default_rng(7)
-        dates = pd.date_range("2024-01-01", periods=365, freq="D")
-        base = 300 + 0.15*np.arange(len(dates))
-        weekly = 35*np.sin(2*np.pi*dates.dayofweek/7)
-        noise = rng.normal(0, 14, len(dates))
-        df_raw = pd.DataFrame({"ds": dates, "y": base + weekly + noise})
-
-    # Zaman temizliği
-    df_raw["ds"] = pd.to_datetime(df_raw["ds"])
-    df_raw = df_raw.sort_values("ds")
+    df_raw = ext_df[[time_col, load_col]].rename(columns={time_col:"ds", load_col:"y"}).copy()
+    df_raw["ds"] = pd.to_datetime(df_raw["ds"], errors="coerce")
+    df_raw = df_raw.dropna(subset=["ds","y"]).sort_values("ds")
 
     # Günlük resample (mean/sum)
     rule = "D"
@@ -644,55 +631,72 @@ elif selected == "Forecasting":
         series = df_raw.set_index("ds")["y"].resample(rule).sum().interpolate("time")
 
     ts = series.reset_index().rename(columns={"index":"ds"})
-    ts = ts.dropna()
     if len(ts) <= holdout_days + max(14, season_periods*2):
-        st.error("Zaman serisi çok kısa. Daha uzun veri sağlayın veya test penceresini küçültün.")
+        st.error("Zaman serisi çok kısa. Test penceresini küçült veya daha uzun veri sağla.")
         st.stop()
 
-    # Train/Test ayır
+    # Train / Test ayrımı
     cutoff = ts["ds"].max() - pd.Timedelta(days=int(holdout_days))
     train = ts[ts["ds"] <= cutoff].copy()
     test  = ts[ts["ds"] >  cutoff].copy()
-
-    # --------- Model: Holt-Winters (fallback: rolling mean) ---------
     y_train = train.set_index("ds")["y"]
     y_test  = test.set_index("ds")["y"]
 
-    fc = None
-    yhat_test = None
-    used_model = "Holt-Winters"
-
-    try:
+    # --------- Modeller ---------
+    def hw_fit_forecast(y_train, y_test, season_periods, horizon):
         from statsmodels.tsa.holtwinters import ExponentialSmoothing
-        model = ExponentialSmoothing(
-            y_train,
-            trend="add",
-            seasonal="add",
-            seasonal_periods=season_periods
-        )
+        model = ExponentialSmoothing(y_train, trend="add", seasonal="add", seasonal_periods=season_periods)
         fit = model.fit(optimized=True, use_brute=True)
-        # test dönemi tahmini
+        # test tahmini
         yhat_test = fit.forecast(len(y_test))
         # ileri tahmin
-        fut = fit.forecast(int(horizon))
-        fc = pd.DataFrame({"ds": pd.date_range(ts["ds"].max() + pd.Timedelta(days=1), periods=int(horizon), freq="D"),
-                           "yhat": fut.values})
-        # basit güven aralığı (residual std)
+        fut_vals = fit.forecast(int(horizon))
+        # basit güven bandı: residual std
         resid = (y_train - fit.fittedvalues).dropna()
         s = float(resid.std()) if len(resid) else 0.0
+        fc = pd.DataFrame({
+            "ds": pd.date_range(ts["ds"].max() + pd.Timedelta(days=1), periods=int(horizon), freq="D"),
+            "yhat": fut_vals.values
+        })
         fc["yhat_low"]  = fc["yhat"] - 1.96*s
         fc["yhat_high"] = fc["yhat"] + 1.96*s
-    except Exception:
-        used_model = "Rolling Mean"
-        roll = y_train.rolling(window=season_periods, min_periods=1).mean()
-        last = float(roll.iloc[-1])
-        # test tahmini
-        yhat_test = pd.Series(last, index=y_test.index)
+        return yhat_test, fc
+
+    def prophet_fit_forecast(train_df, test_df, horizon, season_periods):
+        from prophet import Prophet
+        m = Prophet(seasonality_mode="additive", yearly_seasonality=False, daily_seasonality=False)
+        if season_periods == 7:
+            m.add_seasonality(name="weekly", period=7, fourier_order=6)
+        else:
+            m.add_seasonality(name="monthly", period=30, fourier_order=6)
+        m.fit(train_df.rename(columns={"ds":"ds","y":"y"}))
+        # test dönemi
+        yhat_test_df = m.predict(test_df[["ds"]])
+        yhat_test = pd.Series(yhat_test_df["yhat"].values, index=test_df["ds"].values)
         # ileri tahmin
-        future_idx = pd.date_range(ts["ds"].max() + pd.Timedelta(days=1), periods=int(horizon), freq="D")
-        fc = pd.DataFrame({"ds": future_idx, "yhat": last})
-        fc["yhat_low"]  = fc["yhat"]
-        fc["yhat_high"] = fc["yhat"]
+        future = m.make_future_dataframe(periods=int(horizon), freq="D", include_history=False)
+        fut = m.predict(future)
+        fc = pd.DataFrame({
+            "ds": fut["ds"],
+            "yhat": fut["yhat"],
+            "yhat_low": fut["yhat_lower"],
+            "yhat_high": fut["yhat_upper"]
+        })
+        return yhat_test, fc
+
+    # Çalıştır
+    try:
+        if model_choice == "Prophet":
+            used_model = "Prophet"
+            yhat_test, fc = prophet_fit_forecast(train[["ds","y"]], test[["ds","y"]], horizon, season_periods)
+        else:
+            used_model = "Holt-Winters"
+            yhat_test, fc = hw_fit_forecast(y_train, y_test, season_periods, horizon)
+    except Exception as e:
+        # Prophet kurulu değilse ya da hata verirse HW'ye düş
+        used_model = "Holt-Winters"
+        yhat_test, fc = hw_fit_forecast(y_train, y_test, season_periods, horizon)
+        st.info(f"{model_choice} kullanılamadı ({e}). Holt-Winters ile devam edildi.")
 
     # --------- Metrikler ---------
     def _mape(y_true, y_pred):
@@ -713,26 +717,37 @@ elif selected == "Forecasting":
 
     st.divider()
 
-    # --------- Grafik ---------
-    import plotly.express as px
-    hist = ts.copy()
-    hist = hist.rename(columns={"y":"Gerçek"})
-    fut = fc.rename(columns={"yhat":"Tahmin", "yhat_low":"Alt", "yhat_high":"Üst"})
+    # --------- Grafik (5 çizgi) ---------
+    import plotly.graph_objects as go
+    fig = go.Figure()
+    # Geçmiş
+    fig.add_trace(go.Scatter(x=train["ds"], y=train["y"], mode="lines", name="Gerçek (Train)"))
+    # Test gerçek
+    fig.add_trace(go.Scatter(x=test["ds"], y=test["y"], mode="lines", name="Gerçek (Test)"))
+    # Test tahmini
+    fig.add_trace(go.Scatter(x=y_test.index, y=yhat_test.values, mode="lines", name="Test Tahmini"))
+    # İleri tahmin
+    fig.add_trace(go.Scatter(x=fc["ds"], y=fc["yhat"], mode="lines", name="İleri Tahmin"))
+    # Bandlar
+    fig.add_trace(go.Scatter(x=fc["ds"], y=fc["yhat_low"],  mode="lines", name="Alt Band", line=dict(dash="dot")))
+    fig.add_trace(go.Scatter(x=fc["ds"], y=fc["yhat_high"], mode="lines", name="Üst Band", line=dict(dash="dot")))
 
-    fig = px.line(template="plotly_white", title="Geçmiş ve İleri Tahmin")
-    fig.add_scatter(x=hist["ds"], y=hist["Gerçek"], mode="lines", name="Gerçek")
-    # test dönemi vurgusu
-    fig.add_scatter(x=y_test.index, y=yhat_test.values, mode="lines", name="Test Tahmini")
-    fig.add_scatter(x=fut["ds"], y=fut["Tahmin"], mode="lines", name="İleri Tahmin")
-    fig.add_scatter(x=fut["ds"], y=fut["Alt"], mode="lines", name="Alt Band", line=dict(dash="dot"))
-    fig.add_scatter(x=fut["ds"], y=fut["Üst"], mode="lines", name="Üst Band", line=dict(dash="dot"))
-    fig.update_layout(xaxis_title="Tarih", yaxis_title="kW")
+    fig.update_layout(
+        template="plotly_white",
+        title="Geçmiş + Test Tahmini + İleri Tahmin",
+        xaxis_title="Tarih",
+        yaxis_title="kW",
+        legend_title="Seri"
+    )
     st.plotly_chart(fig, use_container_width=True)
 
     # --------- İndirilebilir çıktı ---------
-    out = fut[["ds","Tahmin","Alt","Üst"]].copy()
-    out_csv = out.to_csv(index=False).encode("utf-8")
-    st.download_button("📥 Tahmini CSV indir", data=out_csv, file_name="forecast.csv", mime="text/csv")
+    out = fc[["ds","yhat","yhat_low","yhat_high"]].rename(
+        columns={"ds":"tarih","yhat":"tahmin_kw","yhat_low":"alt","yhat_high":"üst"}
+    )
+    st.download_button("📥 Tahmini CSV indir", data=out.to_csv(index=False).encode("utf-8"),
+                       file_name="forecast.csv", mime="text/csv")
+
 
 
 # ===================== SAYFA 4: Arıza / Anomali =====================
