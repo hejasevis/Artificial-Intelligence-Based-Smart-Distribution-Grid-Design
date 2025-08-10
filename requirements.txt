@@ -11,3 +11,4 @@ scipy
 plotly
 scikit-learn
 statsmodels
+lightgbm
