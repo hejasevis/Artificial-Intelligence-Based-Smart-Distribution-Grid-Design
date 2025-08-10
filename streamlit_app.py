@@ -207,34 +207,27 @@ if selected == "Talep Girdisi":
     def eval_trafo(row):
         t_latlon = (float(row["Enlem"]), float(row["Boylam"]))
         poles_latlon = list(zip(direk_clean["Enlem"].astype(float), direk_clean["Boylam"].astype(float)))
-        route, Lm, used, prop, spans = build_route_and_stats((new_lat, new_lon), t_latlon, poles_latlon,
-                                                             max_span=max_span, snap_radius=snap_radius)
-        dv = vdrop_kLN(Lm, user_kw, k_const)  # k·L·N
-        cap_ok = False
-        try:
-            kva = float(row["Gücü[kVA]"])
-            cap_ok = (kva * 0.8) >= user_kw  # pf=0.8
-        except Exception:
-            pass
+        route, Lm, used, prop, spans = build_route_and_stats(
+            (new_lat, new_lon), t_latlon, poles_latlon,
+            max_span=float(max_span), snap_radius=float(snap_radius)
+        )
+        dv = vdrop_kLN(Lm, float(user_kw), float(k_const))
         return {
             "Montaj Yeri": row["Montaj Yeri"],
             "Gücü[kVA]": row["Gücü[kVA]"],
             "lat": t_latlon[0], "lon": t_latlon[1],
-            "route": route, "L_m": Lm,
-            "Gerilim Düşümü (%)": dv, "Kapasite Uygun": cap_ok,
-            "Kullanılan Direk": used, "Yeni Direk": prop
+            "route": route, "L_m": Lm, "Kullanılan Direk": used, "Yeni Direk": prop,
+            "Gerilim Düşümü (%)": np.clip(dv, 0, 15) if np.isfinite(dv) else np.nan,
+            "Kapasite Uygun": (float(row["Gücü[kVA]"]) * 0.8) >= float(user_kw)
         }
 
-    trafo_local = trafo_clean.copy()
-    trafo_local["geo_dist"] = trafo_local.apply(
+    # En yakın 8 trafo
+    trafo_clean["_dist"] = trafo_clean.apply(
         lambda r: geodesic((new_lat, new_lon), (float(r["Enlem"]), float(r["Boylam"]))).meters, axis=1
     )
-    topN = trafo_local.sort_values("geo_dist").head(8)
-    evals = [eval_trafo(r) for _, r in topN.iterrows()]
-    cand_df = pd.DataFrame(evals).sort_values(
-        by=["Kapasite Uygun", "Gerilim Düşümü (%)", "Yeni Direk", "L_m"],
-        ascending=[False, True, True, True]
-    )
+    near8 = trafo_clean.sort_values("_dist").head(8)
+    cand = [eval_trafo(r) for _, r in near8.iterrows()]
+    cand_df = pd.DataFrame(cand).sort_values(["Gerilim Düşümü (%)", "L_m"]).reset_index(drop=True)
 
     with st.expander("📈 En Uygun Trafo Adayları"):
         st.dataframe(
@@ -264,21 +257,35 @@ if selected == "Talep Girdisi":
     folium.Marker((best["lat"], best["lon"]), icon=folium.Icon(color="orange", icon="bolt", prefix="fa"),
                   tooltip="Seçilen Trafo").add_to(m2)
 
-    # Rota üzerinde mevcut (mavi) / yeni (mor) direkler
+    # Rota üzerinde mevcut (mavi) / yeni (mor) direkler — TOLERANSLI (KDTree)
     try:
         if HAS_PYPROJ and len(best["route"]) >= 2:
+            # 1) WGS84 → metre projeksiyon
             fwd = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
             to_xy = lambda lon, lat: fwd.transform(lon, lat)
-            poles_xy = [to_xy(lon, lat) for (lat, lon) in zip(direk_clean["Enlem"], direk_clean["Boylam"])]
-            snapped_set = set(poles_xy)
-            route_xy = [to_xy(lon, lat) for (lat, lon) in best["route"]]
+
+            # 2) Mevcut direkleri uzaysal indeksle
+            poles_xy = np.column_stack([
+                *to_xy(direk_clean["Boylam"].astype(float).to_numpy(),
+                       direk_clean["Enlem"].astype(float).to_numpy())
+            ]).T  # shape (N, 2)
+            tree = build_kdtree(poles_xy)
+
+            # 3) Rota noktalarını sorgula
+            route_xy = np.array([to_xy(lon, lat) for (lat, lon) in best["route"]])
+            tol = float(snap_radius)  # metre
+            used_idx = set()
             for (lat, lon), (x, y) in zip(best["route"], route_xy):
-                if (x, y) in snapped_set:
-                    folium.CircleMarker((lat, lon), radius=5, color="blue", fill=True, fill_opacity=0.9,
-                                        tooltip="Mevcut Direk (rota)").add_to(m2)
-                else:
-                    folium.CircleMarker((lat, lon), radius=5, color="purple", fill=True, fill_opacity=0.9,
-                                        tooltip="Önerilen Yeni Direk").add_to(m2)
+                is_existing = False
+                if tree is not None and len(poles_xy) > 0:
+                    dist, idx = tree.query([x, y], k=1)
+                    if np.isfinite(dist) and dist <= tol:
+                        is_existing = True
+                        used_idx.add(int(idx))
+                color = "blue" if is_existing else "purple"
+                tip   = "Mevcut Direk (rota)" if is_existing else "Önerilen Yeni Direk"
+                folium.CircleMarker((lat, lon), radius=5, color=color, fill=True, fill_opacity=0.9,
+                                    tooltip=tip).add_to(m2)
     except Exception:
         pass
 
@@ -313,15 +320,11 @@ if selected == "Talep Girdisi":
 
     # Durum kartı (sayfa içi hesap)
     durum_val = dv_val <= drop_threshold_pct
-    bg = "#0ea65d" if durum_val else "#ef4444"
-    txt = "Eşik altında — Tasarım uygun." if durum_val else "Eşik üstünde — İyileştirme gerek."
-    st.markdown(
-        f"""<div style="background:{bg};padding:16px;border-radius:14px;color:white;font-weight:600;">{txt}</div>""",
-        unsafe_allow_html=True
-    )
+    c1, c2, c3 = st.columns(3)
+    c1.metric("🎯 Eşik", f"%{drop_threshold_pct:.1f}")
+    c2.metric("Durum", "✅ Uygun" if durum_val else "❌ Uygunsuz")
+    c3.metric("Seçilen Trafo", str(best["Montaj Yeri"]))
 
-    st.subheader("📡 Oluşturulan Şebeke Hattı")
-    st_folium(m2, height=620, width="100%", key="result_map_basic")
 
 # ===================== SAYFA 2: Gerilim Düşümü — Gerçek Veri & AI =====================
 elif selected == "Gerilim Düşümü":
