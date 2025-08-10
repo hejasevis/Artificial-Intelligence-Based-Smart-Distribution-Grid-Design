@@ -512,15 +512,15 @@ elif selected == "Gerilim Düşümü":
 
 
 
-# ===================== SAYFA 3: Forecasting (Sadece Prophet) =====================
-elif selected == "Forecasting":
+# ===================== SAYFA 3: Forecasting (Zaman Serisi Tahmini) =====================
+elif selected == "Zaman Serisi Tahmini":
     st.subheader("📈 Zaman Serisi Tahmini ")
 
     c1, c2, c3 = st.columns([1,1,1])
     with c1:
         horizon = st.number_input("Tahmin ufku (gün)", 7, 180, 30, 1)
     with c2:
-        holdout_days = st.number_input("Test penceresi (gün)", 7, 90, 30, 1)
+        holdout_days = st.number_input("Test Veri Aralığı (Gün)", 7, 90, 30, 1)
     with c3:
         agg = st.selectbox("Zaman Ölçeği", ["Günlük Ortalama", "Günlük Toplam"], index=0)
 
