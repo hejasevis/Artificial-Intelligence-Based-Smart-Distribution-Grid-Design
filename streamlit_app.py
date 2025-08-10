@@ -585,17 +585,7 @@ elif selected == "Gerilim Düşümü":
             }),
             use_container_width=True
         )
-
-
-    # (Opsiyonel) Kısa tablo
-    with st.expander("Detay Tablo (5 Direk)"):
-        st.dataframe(
-            dloc[["Direk Kodu","Mesafe (m)","Yük (kW)","Gerçek (%)","Tahmin (%)"]]
-            .style.format({"Mesafe (m)":"{:.0f}", "Yük (kW)":"{:.0f}", "Gerçek (%)":"{:.2f}", "Tahmin (%)":"{:.2f}"}),
-            use_container_width=True
-        )
-  
-
+        
 # ===================== SAYFA 3: Forecasting =====================
 elif selected == "Forecasting":
     st.subheader("📈 Yük Tahmini (Forecasting) — Demo")
