@@ -314,201 +314,149 @@ if selected == "Talep Girdisi":
     st.subheader("📡 Oluşturulan Şebeke Hattı")
     st_folium(m2, height=620, width="100%", key="result_map_basic")
 
-# ===================== SAYFA 2: Gerilim Düşümü (k·L·N + AI) =====================
+# ===================== SAYFA 2: Gerilim Düşümü (k·L·N + AI, sade) =====================
 elif selected == "Gerilim Düşümü":
-    st.subheader("📉 Gerilim Düşümü Analizi — k·L·N + AI")
-    st.caption("Formül: Gerilim Düşümü (%) = k × L (m) × N (kW). AI, bu ilişkiyi veriden öğrenerek kalibre eder ve öneri üretir.")
+    st.subheader("📉 Gerilim Düşümü")
 
-    # --- Parametreler
-    with st.sidebar.expander("🔧 Parametreler", expanded=True):
-        k_const = st.number_input("k sabiti", 0.0, 1.0, 0.0001, 0.0001, key="gd_k")
-        thr_pct = st.number_input("Eşik (Gerilim Düşümü, %)", 0.5, 20.0, 5.0, 0.5, key="gd_thr")
-        P_fixed = st.slider("Sabit N (kW) — L'ye karşı eğri", 1, 1000, 150, 1)
-        L_fixed = st.slider("Sabit L (m) — N'e karşı eğri", 10, 5000, 600, 10)
-        use_ai  = st.toggle("🤖 AI Modu (öğrenilmiş tahmin ve öneri)", value=True)
+    # ------- Girdiler -------
+    c0, c1, c2, c3 = st.columns([1,1,1,1])
+    with c0:
+        k_const = st.number_input("k sabiti", 0.0, 1.0, 0.0001, 0.0001, key="gd_k_inline")
+    with c1:
+        thr_pct = st.number_input("Eşik (%)", 0.5, 20.0, 5.0, 0.5, key="gd_thr_inline")
+    with c2:
+        L_in = st.number_input("Hat Uzunluğu L (m)", 10, 10000, 600, 10)
+    with c3:
+        N_in = st.number_input("Yük N (kW)", 1, 5000, 200, 1)
 
-    # --- Formül fonksiyonu
+    # k istersen senaryo özelinde oynansın
+    k_in = k_const
+
+    # ------- Formül fonksiyonu -------
     def vdrop_kLN(L_m: float, P_kw: float, k: float) -> float:
         try:
             return float(k) * float(L_m) * float(P_kw)
         except Exception:
             return float("nan")
 
-    # ========= Kesit grafikleri (her zaman formül temelli çiziyoruz) =========
-    st.markdown("### 📈 Kesit Grafikleri (Eşik çizgili)")
+    # ------- Eğitim verisi: ext_df varsa kullan, yoksa sentetik -------
+    def build_training_df(ext_df):
+        try:
+            cols_lower = {c.lower(): c for c in ext_df.columns}
+        except Exception:
+            cols_lower = {}
+        needs = ["l_m", "p_kw", "k", "dv_pct"]
+        if ext_df is not None and len(ext_df) > 0 and all(n in cols_lower for n in needs):
+            df = pd.DataFrame({
+                "L_m":    ext_df[cols_lower["l_m"]],
+                "P_kw":   ext_df[cols_lower["p_kw"]],
+                "k":      ext_df[cols_lower["k"]],
+                "dv_pct": ext_df[cols_lower["dv_pct"]],
+            }).dropna()
+            df["dv_pct"] = df["dv_pct"].clip(0, 1000)
+            return df
 
-    # (1) Sabit N'de, L'ye karşı
-    Ls = np.linspace(10, 5000, 150)
-    dv_L = k_const * Ls * P_fixed
-    fig_L = px.line(x=Ls, y=dv_L, markers=True, template="plotly_white",
-                    title=f"Gerilim Düşümü (%) — Sabit Yük: {P_fixed} kW (L'ye karşı)")
-    fig_L.add_hline(y=thr_pct, line_dash="dot", annotation_text=f"Eşik %{thr_pct:.2f}")
-    fig_L.update_layout(xaxis_title="Hat Uzunluğu L (m)", yaxis_title="Gerilim Düşümü (%)")
+        # fallback: sentetik
+        rng = np.random.default_rng(0)
+        n = 3000
+        L = rng.uniform(10, 5000, n)
+        P = rng.uniform(1, 1000, n)
+        k_vals = rng.normal(loc=k_const if k_const > 0 else 1e-4,
+                            scale=0.25 * (k_const if k_const > 0 else 1e-4),
+                            size=n)
+        k_vals = np.clip(k_vals, 1e-6, 1.0)
+        dv = k_vals * L * P * rng.normal(1.0, 0.03, size=n)  # küçük ölçüm hatası
+        return pd.DataFrame({"L_m": L, "P_kw": P, "k": k_vals, "dv_pct": dv})
 
-    # Eşik altında kalmak için max L
-    L_max = (thr_pct / (k_const * P_fixed)) if k_const > 0 and P_fixed > 0 else np.inf
-    L_txt = f"{L_max:.0f} m" if np.isfinite(L_max) else "∞"
-    st.caption(f"**Sabit N={P_fixed} kW** için eşik altında kalmak: **L ≤ {L_txt}**")
+    train_df = build_training_df(ext_df)
 
-    # (2) Sabit L'de, N'e karşı
-    Ns = np.linspace(1, 1000, 150)
-    dv_N = k_const * L_fixed * Ns
-    fig_N = px.line(x=Ns, y=dv_N, markers=True, template="plotly_white",
-                    title=f"Gerilim Düşümü (%) — Sabit Hat Uzunluğu: {L_fixed} m (N'e karşı)")
-    fig_N.add_hline(y=thr_pct, line_dash="dot", annotation_text=f"Eşik %{thr_pct:.2f}")
-    fig_N.update_layout(xaxis_title="Yük N (kW)", yaxis_title="Gerilim Düşümü (%)")
+    # ------- Model eğitimi (LightGBM yoksa RF'ye düş) -------
+    @st.cache_resource
+    def train_regressor(df: pd.DataFrame):
+        X = df[["L_m", "P_kw", "k"]]
+        y = df["dv_pct"]
+        try:
+            from lightgbm import LGBMRegressor
+            reg = LGBMRegressor(n_estimators=400, learning_rate=0.05, num_leaves=64, random_state=42)
+        except Exception:
+            from sklearn.ensemble import RandomForestRegressor
+            reg = RandomForestRegressor(n_estimators=350, random_state=42, n_jobs=-1)
+        reg.fit(X, y)
+        return reg
 
-    c1, c2 = st.columns(2)
-    c1.plotly_chart(fig_L, use_container_width=True)
-    c2.plotly_chart(fig_N, use_container_width=True)
+    try:
+        reg = train_regressor(train_df)
+    except Exception:
+        reg = None
+
+    # ------- Tahminler -------
+    dv_formula = vdrop_kLN(L_in, N_in, k_in)
+    if reg is not None:
+        Xq = pd.DataFrame([{"L_m": L_in, "P_kw": N_in, "k": k_in}])
+        dv_ai = float(reg.predict(Xq)[0])
+    else:
+        dv_ai = float("nan")
+
+    # ------- Sonuç -------
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Formül (k·L·N)", f"%{dv_formula:.2f}")
+    m2.metric("AI Tahmini", f"%{dv_ai:.2f}" if np.isfinite(dv_ai) else "—")
+    m3.metric("Eşik", f"%{thr_pct:.2f}")
+    durum = "Uygun" if (dv_ai if np.isfinite(dv_ai) else dv_formula) <= thr_pct else "Uygunsuz"
+    m4.metric("Durum", durum)
 
     st.divider()
 
-    # ========= 🤖 AI: Eğitim + Tahmin + Öneri =========
-    if use_ai:
-        st.markdown("### 🤖 AI: Öğrenilmiş Tahmin ve Öneri")
+    # ------- Öneri: eşik altına inmek için min ayar -------
+    st.markdown("#### 🔁 Eşik Altına İndirme Önerisi ")
 
-        # ---- 1) Veri hazırlama
-        # Eğer ext_df içinde L_m / P_kw / k / dv_pct gerçek/sentetik veri varsa onu kullan,
-        # yoksa sentetik örneklem üret.
-        def build_training_df(ext_df):
-            try:
-                cand_cols = {c.lower(): c for c in ext_df.columns}
-            except Exception:
-                cand_cols = {}
-            has_all = all(x in cand_cols for x in ["l_m","p_kw","k","dv_pct"])
-            if ext_df is not None and len(ext_df) > 0 and has_all:
-                df = pd.DataFrame({
-                    "L_m":    ext_df[cand_cols["l_m"]],
-                    "P_kw":   ext_df[cand_cols["p_kw"]],
-                    "k":      ext_df[cand_cols["k"]],
-                    "dv_pct": ext_df[cand_cols["dv_pct"]]
-                }).dropna()
-                # clip aşırı uçları
-                df["dv_pct"] = df["dv_pct"].clip(0, 1000)
-                return df
+    # Formül tabanlı hızlı alt sınırlar
+    L_need = (thr_pct / (k_in * N_in)) if k_in > 0 and N_in > 0 else np.inf
+    N_need = (thr_pct / (k_in * L_in)) if k_in > 0 and L_in > 0 else np.inf
 
-            # fallback: sentetik set (k çevresinde jitter)
-            rng = np.random.default_rng(0)
-            L = rng.uniform(10, 5000, 4000)
-            P = rng.uniform(1, 1000, 4000)
-            k_vals = rng.normal(loc=k_const if k_const>0 else 1e-4, scale=0.25*(k_const if k_const>0 else 1e-4), size=4000)
-            k_vals = np.clip(k_vals, 1e-6, 1.0)
-            dv = k_vals * L * P
-            # küçük ölçüm hatası/rasgelelik
-            dv = dv * rng.normal(1.0, 0.03, size=dv.shape)
-            df = pd.DataFrame({"L_m":L,"P_kw":P,"k":k_vals,"dv_pct":dv})
-            return df
+    r1, r2 = st.columns(2)
+    r1.metric("Formüle göre gerekli L (≤)", f"{L_need:.0f} m" if np.isfinite(L_need) else "—")
+    r2.metric("Formüle göre gerekli N (≤)", f"{N_need:.0f} kW" if np.isfinite(N_need) else "—")
 
-        train_df = build_training_df(ext_df)
+    # AI tabanlı küçük iyileştirme (sessiz, debug YOK)
+    def suggest_ai(L0, N0, k0, thr, model, step_L=10, step_N=5, max_iter=800):
+        if model is None:
+            return L0, N0, vdrop_kLN(L0, N0, k0)
+        def pred(Lv, Nv):
+            return float(model.predict(pd.DataFrame([{"L_m": Lv, "P_kw": Nv, "k": k0}]))[0])
+        Lb, Nb = L0, N0
+        dvb = pred(Lb, Nb)
+        it = 0
+        while dvb > thr and it < max_iter:
+            tried = False
+            # önce L azalt
+            if Lb - step_L >= 10:
+                dv_try = pred(Lb - step_L, Nb)
+                if dv_try < dvb:
+                    Lb, dvb, tried = Lb - step_L, dv_try, True
+            # sonra N azalt
+            if dvb > thr and Nb - step_N >= 1:
+                dv_try = pred(Lb, Nb - step_N)
+                if dv_try < dvb:
+                    Nb, dvb, tried = Nb - step_N, dv_try, True
+            if not tried:
+                break
+            it += 1
+        return Lb, Nb, dvb
 
-        # ---- 2) Model eğitimi (hızlı, cache'li)
-        @st.cache_resource
-        def train_models(df: pd.DataFrame):
-            from lightgbm import LGBMRegressor, LGBMClassifier
-            df = df.sample(frac=1.0, random_state=42).reset_index(drop=True)
-            # Regresyon hedef: dv_pct
-            reg = LGBMRegressor(n_estimators=500, learning_rate=0.05, num_leaves=64, random_state=42)
-            reg.fit(df[["L_m","P_kw","k"]], df["dv_pct"])
+    L_ai, N_ai, dv_ai_sug = suggest_ai(L_in, N_in, k_in, thr_pct, reg)
 
-            # Sınıflama hedefi: dv_pct > thr (not: thr o anki UI; bu yüzden classifier yerine
-            # inference'ta reg tahmini > thr kontrolü kullanacağız. Yine de baseline dursun.)
-            clf = LGBMClassifier(n_estimators=250, learning_rate=0.05, num_leaves=48, random_state=42)
-            y_clf = (df["dv_pct"] > df["dv_pct"].median()).astype(int)  # kaba bir ayrım
-            clf.fit(df[["L_m","P_kw","k"]], y_clf)
+    cS1, cS2, cS3 = st.columns(3)
+    cS1.metric("Önerilen L (AI)", f"{L_ai:.0f} m")
+    cS2.metric("Önerilen N (AI)", f"{N_ai:.0f} kW")
+    cS3.metric("Tahmini Düşüm (AI)", f"%{dv_ai_sug:.2f}")
 
-            return reg, clf
+    if dv_ai_sug <= thr_pct:
+        st.success("✅ Eşik altında çözüm bulundu.")
+    else:
+        st.warning("ℹ️ Eşik altına inmek için iletken/k veya besleme koşullarını değiştirmen gerekebilir.")
 
-        try:
-            reg, clf = train_models(train_df)
-        except Exception as e:
-            st.error(f"Model eğitimi başarısız: {e}")
-            reg = clf = None
-
-        # ---- 3) AI Tahmini (anlık girdiler için)
-        colA = st.columns(3)
-        with colA[0]:
-            L_in = st.number_input("Analiz — L (m)", 10, 10000, L_fixed, 10)
-        with colA[1]:
-            N_in = st.number_input("Analiz — N (kW)", 1, 5000, P_fixed, 1)
-        with colA[2]:
-            k_in = st.number_input("Analiz — k", 0.0, 1.0, float(k_const), 0.0001)
-
-        dv_formula = vdrop_kLN(L_in, N_in, k_in)
-        if reg is not None:
-            dv_ai = float(reg.predict(pd.DataFrame([{"L_m":L_in, "P_kw":N_in, "k":k_in}]))[0])
-        else:
-            dv_ai = float("nan")
-
-        cM1, cM2, cM3 = st.columns(3)
-        cM1.metric("Formül (k·L·N)", f"%{dv_formula:.2f}")
-        cM2.metric("AI Tahmini", f"%{dv_ai:.2f}" if np.isfinite(dv_ai) else "—")
-        cM3.metric("Eşik", f"%{thr_pct:.2f}")
-
-        st.progress(min(1.0, max(0.0, dv_formula/(thr_pct*2.0)))), st.progress(min(1.0, max(0.0, (dv_ai if np.isfinite(dv_ai) else dv_formula)/(thr_pct*2.0))))
-
-        # ---- 4) Öneri (Counterfactual): Eşik altına inmek için minimal ayar
-        st.markdown("#### 🔁 Eşik Altına İnme Önerisi")
-        goal = st.selectbox("Neyi azaltmayı hedefleyelim?", ["Öncelik: L", "Öncelik: N", "Her ikisi de olur"], index=0)
-
-        def suggest_fix(L0, N0, k0, thr, reg_model=None, step_L=10, step_N=5, max_iter=1000):
-            """
-            Basit ve hızlı: küçük adımlarla L/N'yi azalt; önce L, sonra N (veya birlikte).
-            Eğer reg_model verilirse AI tahmini ile kontrol; yoksa formül.
-            """
-            def pred(Lv, Nv):
-                if reg_model is None:
-                    return vdrop_kLN(Lv, Nv, k0)
-                return float(reg_model.predict(pd.DataFrame([{"L_m":Lv,"P_kw":Nv,"k":k0}]))[0])
-
-            L_best, N_best = L0, N0
-            dv_best = pred(L_best, N_best)
-            if dv_best <= thr:
-                return L_best, N_best, dv_best, 0, 0
-
-            iter_count = 0
-            dL = dN = 0
-            while iter_count < max_iter:
-                improved = False
-                if goal in ("Öncelik: L","Her ikisi de olur") and L_best - step_L >= 10:
-                    dv_try = pred(L_best - step_L, N_best)
-                    if dv_try < dv_best:
-                        L_best -= step_L; dv_best = dv_try; dL += step_L; improved = True
-                        if dv_best <= thr: break
-                if goal in ("Öncelik: N","Her ikisi de olur") and N_best - step_N >= 1:
-                    dv_try = pred(L_best, N_best - step_N)
-                    if dv_try < dv_best:
-                        N_best -= step_N; dv_best = dv_try; dN += step_N; improved = True
-                        if dv_best <= thr: break
-                if not improved:
-                    break
-                iter_count += 1
-            return L_best, N_best, dv_best, dL, dN
-
-        L_sug, N_sug, dv_sug, dL, dN = suggest_fix(L_in, N_in, k_in, thr_pct, reg_model=reg)
-        good = dv_sug <= thr_pct
-
-        cS1, cS2, cS3 = st.columns(3)
-        cS1.metric("Önerilen L (m)", f"{L_sug:.0f}", delta=f"-{dL} m" if dL>0 else None)
-        cS2.metric("Önerilen N (kW)", f"{N_sug:.0f}", delta=f"-{dN} kW" if dN>0 else None)
-        cS3.metric("Tahmini Gerilim Düşümü", f"%{dv_sug:.2f}", delta=f"{dv_sug - dv_formula:+.2f}")
-
-        if good:
-            st.success("✅ Eşik altında bir çözüm bulundu.")
-        else:
-            st.warning("ℹ️ Eşik altına inen bir çözüm bulunamadı; k/iletken değişimi gerekebilir.")
-
-        # (Opsiyonel) Açıklanabilirlik
-        with st.expander("🪄 AI Açıklaması (opsiyonel)"):
-            try:
-                import shap
-                explainer = shap.Explainer(reg, feature_names=["L_m","P_kw","k"])
-                shap_vals = explainer(pd.DataFrame([[L_in, N_in, k_in]], columns=["L_m","P_kw","k"]))
-                sv = pd.Series(shap_vals.values[0], index=["L_m","P_kw","k"]).abs().sort_values(ascending=False)
-                fig_imp = px.bar(sv, title="Özellik Etkisi (|SHAP|)", labels={"value":"Etki","index":"Özellik"}, template="plotly_white", text_auto=True)
-                st.plotly_chart(fig_imp, use_container_width=True)
-            except Exception:
-                st.info("SHAP ortamda yok veya yüklenemedi. (requirements’a `shap` ekleyip etkinleştirebilirsin.)")
+    # Not: Kesit grafikleri ve progress/debug çıktıları kaldırıldı.
 
 
 # ===================== SAYFA 3: Forecasting =====================
