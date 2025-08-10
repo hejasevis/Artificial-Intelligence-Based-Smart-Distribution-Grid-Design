@@ -456,12 +456,11 @@ elif selected == "Gerilim Düşümü":
     # 4) Gerçek (formül) ve AI tahmini
     dloc["Gerçek (%)"] = dloc.apply(lambda r: vdrop_kLN(r["Mesafe (m)"], r["Yük (kW)"], k_in), axis=1)
     if reg is not None:
-    Xb = dloc.rename(columns={"Mesafe (m)": "L_m", "Yük (kW)": "P_kw"})[["L_m", "P_kw"]].copy()
-    Xb["k"] = k_in
-    dloc["Tahmin (%)"] = reg.predict(Xb)
+        Xb = dloc.rename(columns={"Mesafe (m)": "L_m", "Yük (kW)": "P_kw"})[["L_m", "P_kw"]].copy()
+        Xb["k"] = k_in
+        dloc["Tahmin (%)"] = reg.predict(Xb)
     else:
-    dloc["Tahmin (%)"] = np.nan
-
+        dloc["Tahmin (%)"] = np.nan
 
     # 5) ÜST SINIR: max %15’e clip
     dloc["Gerçek (%)"]  = dloc["Gerçek (%)"].clip(upper=15)
