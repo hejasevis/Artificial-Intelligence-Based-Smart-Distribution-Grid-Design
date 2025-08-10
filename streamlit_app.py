@@ -588,33 +588,152 @@ elif selected == "Gerilim Düşümü":
 
 # ===================== SAYFA 3: Forecasting =====================
 elif selected == "Forecasting":
-    st.subheader("📈 Yük Tahmini (Forecasting) — Demo")
-    st.caption("Sentetik günlük seri + Holt-Winters (yoksa rolling mean) ile 60 gün tahmin.")
+    st.subheader("📈 Yük Tahmini (Forecasting) — Günlük")
 
-    rng = np.random.default_rng(7)
-    days = pd.date_range("2024-01-01", periods=365, freq="D")
-    base = 300 + 0.1*np.arange(len(days))
-    weekly = 40*np.sin(2*np.pi*days.dayofweek/7)
-    noise = rng.normal(0, 15, len(days))
-    y = base + weekly + noise
-    ts = pd.DataFrame({"ds": days, "y": y})
+    # --------- Girdiler (sayfa içi) ---------
+    c1, c2, c3, c4 = st.columns([1,1,1,1])
+    with c1:
+        horizon = st.number_input("Tahmin ufku (gün)", 7, 120, 30, 1)
+    with c2:
+        agg = st.selectbox("Zaman toplaması", ["Günlük Ortalama", "Günlük Toplam"], index=0)
+    with c3:
+        season = st.selectbox("Mevsimsellik", ["Haftalık (7)", "Aylık (~30)"], index=0)
+    with c4:
+        holdout_days = st.number_input("Test penceresi (gün)", 7, 90, 30, 1)
+
+    season_periods = 7 if "7" in season else 30
+
+    # --------- Veri Hazırlama ---------
+    # ext_df global'den geliyor (smart_grid_dataset.csv)
+    df_raw = None
+    if ext_df is not None and len(ext_df) > 0:
+        # kolon adayları
+        cols = {c.lower(): c for c in ext_df.columns}
+        # zaman kolonu
+        time_col = None
+        for k in ["timestamp", "datetime", "date", "ds"]:
+            if k in cols:
+                time_col = cols[k]; break
+        # yük kolonu
+        load_col = None
+        for k in ["load", "y", "power_kw", "kw", "value"]:
+            if k in cols:
+                load_col = cols[k]; break
+
+        if time_col and load_col:
+            df_raw = ext_df[[time_col, load_col]].rename(columns={time_col:"ds", load_col:"y"}).copy()
+
+    # Eğer dataset uygun değilse sentetik üret
+    if df_raw is None or len(df_raw) < 30:
+        rng = np.random.default_rng(7)
+        dates = pd.date_range("2024-01-01", periods=365, freq="D")
+        base = 300 + 0.15*np.arange(len(dates))
+        weekly = 35*np.sin(2*np.pi*dates.dayofweek/7)
+        noise = rng.normal(0, 14, len(dates))
+        df_raw = pd.DataFrame({"ds": dates, "y": base + weekly + noise})
+
+    # Zaman temizliği
+    df_raw["ds"] = pd.to_datetime(df_raw["ds"])
+    df_raw = df_raw.sort_values("ds")
+
+    # Günlük resample (mean/sum)
+    rule = "D"
+    if "Ortalama" in agg:
+        series = df_raw.set_index("ds")["y"].resample(rule).mean().interpolate("time")
+    else:
+        series = df_raw.set_index("ds")["y"].resample(rule).sum().interpolate("time")
+
+    ts = series.reset_index().rename(columns={"index":"ds"})
+    ts = ts.dropna()
+    if len(ts) <= holdout_days + max(14, season_periods*2):
+        st.error("Zaman serisi çok kısa. Daha uzun veri sağlayın veya test penceresini küçültün.")
+        st.stop()
+
+    # Train/Test ayır
+    cutoff = ts["ds"].max() - pd.Timedelta(days=int(holdout_days))
+    train = ts[ts["ds"] <= cutoff].copy()
+    test  = ts[ts["ds"] >  cutoff].copy()
+
+    # --------- Model: Holt-Winters (fallback: rolling mean) ---------
+    y_train = train.set_index("ds")["y"]
+    y_test  = test.set_index("ds")["y"]
+
+    fc = None
+    yhat_test = None
+    used_model = "Holt-Winters"
 
     try:
         from statsmodels.tsa.holtwinters import ExponentialSmoothing
-        model = ExponentialSmoothing(ts.y, trend="add", seasonal="add", seasonal_periods=7)
-        fit = model.fit(optimized=True)
-        fut = fit.forecast(60)
-        fc = pd.DataFrame({"ds": pd.date_range(days[-1] + pd.Timedelta(days=1), periods=60), "yhat": fut.values})
+        model = ExponentialSmoothing(
+            y_train,
+            trend="add",
+            seasonal="add",
+            seasonal_periods=season_periods
+        )
+        fit = model.fit(optimized=True, use_brute=True)
+        # test dönemi tahmini
+        yhat_test = fit.forecast(len(y_test))
+        # ileri tahmin
+        fut = fit.forecast(int(horizon))
+        fc = pd.DataFrame({"ds": pd.date_range(ts["ds"].max() + pd.Timedelta(days=1), periods=int(horizon), freq="D"),
+                           "yhat": fut.values})
+        # basit güven aralığı (residual std)
+        resid = (y_train - fit.fittedvalues).dropna()
+        s = float(resid.std()) if len(resid) else 0.0
+        fc["yhat_low"]  = fc["yhat"] - 1.96*s
+        fc["yhat_high"] = fc["yhat"] + 1.96*s
     except Exception:
-        roll = ts.y.rolling(7, min_periods=1).mean()
-        fut = np.repeat(roll.iloc[-1], 60)
-        fc = pd.DataFrame({"ds": pd.date_range(days[-1] + pd.Timedelta(days=1), periods=60), "yhat": fut})
+        used_model = "Rolling Mean"
+        roll = y_train.rolling(window=season_periods, min_periods=1).mean()
+        last = float(roll.iloc[-1])
+        # test tahmini
+        yhat_test = pd.Series(last, index=y_test.index)
+        # ileri tahmin
+        future_idx = pd.date_range(ts["ds"].max() + pd.Timedelta(days=1), periods=int(horizon), freq="D")
+        fc = pd.DataFrame({"ds": future_idx, "yhat": last})
+        fc["yhat_low"]  = fc["yhat"]
+        fc["yhat_high"] = fc["yhat"]
 
-    fig_fc = px.line(title="Günlük Yük — Geçmiş ve Tahmin", template="plotly_white")
-    fig_fc.add_scatter(x=ts.ds, y=ts.y, mode="lines", name="Geçmiş")
-    fig_fc.add_scatter(x=fc.ds, y=fc.yhat, mode="lines", name="Tahmin")
-    fig_fc.update_layout(xaxis_title="Tarih", yaxis_title="kW")
-    st.plotly_chart(fig_fc, use_container_width=True)
+    # --------- Metrikler ---------
+    def _mape(y_true, y_pred):
+        yt = np.array(y_true); yp = np.array(y_pred)
+        mask = yt != 0
+        if mask.sum() == 0: return np.nan
+        return float(np.mean(np.abs((yt[mask]-yp[mask])/yt[mask]))*100)
+
+    rmse = float(np.sqrt(np.mean((y_test.values - yhat_test.values)**2)))
+    mae  = float(np.mean(np.abs(y_test.values - yhat_test.values)))
+    mape = _mape(y_test.values, yhat_test.values)
+
+    k1,k2,k3,k4 = st.columns(4)
+    k1.metric("Model", used_model)
+    k2.metric("RMSE", f"{rmse:,.2f}")
+    k3.metric("MAE",  f"{mae:,.2f}")
+    k4.metric("MAPE", f"%{mape:,.2f}" if np.isfinite(mape) else "—")
+
+    st.divider()
+
+    # --------- Grafik ---------
+    import plotly.express as px
+    hist = ts.copy()
+    hist = hist.rename(columns={"y":"Gerçek"})
+    fut = fc.rename(columns={"yhat":"Tahmin", "yhat_low":"Alt", "yhat_high":"Üst"})
+
+    fig = px.line(template="plotly_white", title="Geçmiş ve İleri Tahmin")
+    fig.add_scatter(x=hist["ds"], y=hist["Gerçek"], mode="lines", name="Gerçek")
+    # test dönemi vurgusu
+    fig.add_scatter(x=y_test.index, y=yhat_test.values, mode="lines", name="Test Tahmini")
+    fig.add_scatter(x=fut["ds"], y=fut["Tahmin"], mode="lines", name="İleri Tahmin")
+    fig.add_scatter(x=fut["ds"], y=fut["Alt"], mode="lines", name="Alt Band", line=dict(dash="dot"))
+    fig.add_scatter(x=fut["ds"], y=fut["Üst"], mode="lines", name="Üst Band", line=dict(dash="dot"))
+    fig.update_layout(xaxis_title="Tarih", yaxis_title="kW")
+    st.plotly_chart(fig, use_container_width=True)
+
+    # --------- İndirilebilir çıktı ---------
+    out = fut[["ds","Tahmin","Alt","Üst"]].copy()
+    out_csv = out.to_csv(index=False).encode("utf-8")
+    st.download_button("📥 Tahmini CSV indir", data=out_csv, file_name="forecast.csv", mime="text/csv")
+
 
 # ===================== SAYFA 4: Arıza / Anomali =====================
 elif selected == "Arıza/Anomali":
