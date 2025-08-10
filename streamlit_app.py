@@ -586,10 +586,6 @@ elif selected == "Gerilim Düşümü":
             use_container_width=True
         )
 
-tamam—istediğin gibi **kolonları otomatik eşleştiren**, **tüm tarihleri 2025’e sabitleyen**, **Holt-Winters ve Prophet sonuçlarını alt alta** gösteren, metrikleri (RMSE, MAE, MAPE, RMSE%) veren **tam Forecasting sayfası** aşağıda.
-Bunu projendeki `elif selected == "Forecasting":` bloğunun **tamamı** yerine yapıştır.
-
-```python
 # ===================== SAYFA 3: Forecasting (Holt-Winters + Prophet, 2025 görünüm) =====================
 elif selected == "Forecasting":
     st.subheader("📈 Yük Tahmini (Forecasting) — Günlük")
@@ -801,7 +797,7 @@ elif selected == "Forecasting":
 
     except Exception as e:
         st.error(f"Prophet çalıştırılamadı: {e} — requirements.txt'e 'prophet' eklemen gerekir.")
-```
+
 
 
 # ===================== SAYFA 4: Arıza / Anomali =====================
