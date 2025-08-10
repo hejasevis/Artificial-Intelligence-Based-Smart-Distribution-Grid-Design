@@ -401,7 +401,7 @@ if selected == "Talep Girdisi":
 
 # ===================== SAYFA 2: Gerilim Düşümü — Gerçek Veri & AI (Trafo Bazlı Özet) =====================
 elif selected == "Gerilim Düşümü":
-    st.subheader("📉 Gerilim Düşümü — Gerçek Veri & AI (Trafo Bazlı Özet)")
+    st.subheader("📉 Gerilim Düşümü ")
 
     # ------- Girdiler (sayfa içi) -------
     c0, c1, c2, c3 = st.columns([1,1,1,1])
@@ -474,7 +474,7 @@ elif selected == "Gerilim Düşümü":
     except Exception:
         reg = None
 
-    # ------- Örnek tahmin (girdi kutularına göre) -------
+    # ------- Örnek tahmin -------
     dv_formula = vdrop_kLN(L_in, N_in, k_in)
     if reg is not None:
         Xq = pd.DataFrame([{"L_m": L_in, "P_kw": N_in, "k": k_in}])
@@ -562,7 +562,7 @@ elif selected == "Gerilim Düşümü":
         y=["Gerçek (%)", "Tahmin (%)"],
         markers=True,
         template="plotly_white",
-        title=f"{trafo_sel} — 5 En Yakın Direk: Gerçek vs AI"
+        title=f"{trafo_sel} — Gerçek vs AI"
     )
     fig_cmp.add_hline(y=thr_pct, line_dash="dot", annotation_text=f"Eşik %{thr_pct:.2f}")
     fig_cmp.update_layout(
@@ -585,7 +585,7 @@ elif selected == "Gerilim Düşümü":
             }),
             use_container_width=True
         )
-        
+
 # ===================== SAYFA 3: Forecasting =====================
 elif selected == "Forecasting":
     st.subheader("📈 Yük Tahmini (Forecasting) — Demo")
