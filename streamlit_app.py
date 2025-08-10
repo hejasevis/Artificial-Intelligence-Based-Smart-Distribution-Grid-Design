@@ -491,44 +491,178 @@ elif selected == "Gerilim Düşümü":
     m4.metric("Durum", "✅ Uygun" if durum_val else "❌ Uygunsuz")
 
     st.divider()
+# ===================== SAYFA 2: Gerilim Düşümü — Gerçek Veri & AI (Trafo Bazlı Özet) =====================
+elif selected == "Gerilim Düşümü":
+    st.subheader("📉 Gerilim Düşümü — Gerçek Veri & AI (Trafo Bazlı Özet)")
 
-    # --- Gerçek (formül) ve AI tahmini ---
-    dloc["Gerçek (%)"] = dloc.apply(lambda r: vdrop_kLN(r["Mesafe (m)"], r["Yük (kW)"], k_in), axis=1)
+    # ------- Girdiler (sayfa içi) -------
+    c0, c1, c2, c3 = st.columns([1,1,1,1])
+    with c0:
+        k_const = st.number_input("k sabiti", 0.0, 1.0, 0.0001, 0.0001, key="gd_k_inline")
+    with c1:
+        thr_pct = st.number_input("Eşik (%)", 0.5, 20.0, 5.0, 0.5, key="gd_thr_inline")
+    with c2:
+        L_in = st.number_input("Hat Uzunluğu L (m)", 10, 10000, 600, 10)
+    with c3:
+        N_in = st.number_input("Yük N (kW)", 1, 5000, 200, 1)
+
+    k_in = k_const  # aynı k'yı hem örnek hesapta hem AI tahminde kullanacağız
+
+    # ------- Formül -------
+    def vdrop_kLN(L_m: float, P_kw: float, k: float) -> float:
+        try:
+            return float(k) * float(L_m) * float(P_kw)
+        except Exception:
+            return float("nan")
+
+    # ------- Eğitim verisi: ext_df varsa kullan, yoksa sentetik -------
+    def build_training_df(ext_df):
+        try:
+            cols_lower = {c.lower(): c for c in ext_df.columns}
+        except Exception:
+            cols_lower = {}
+        needs = ["l_m", "p_kw", "k", "dv_pct"]
+        if ext_df is not None and len(ext_df) > 0 and all(n in cols_lower for n in needs):
+            df = pd.DataFrame({
+                "L_m":    ext_df[cols_lower["l_m"]],
+                "P_kw":   ext_df[cols_lower["p_kw"]],
+                "k":      ext_df[cols_lower["k"]],
+                "dv_pct": ext_df[cols_lower["dv_pct"]],
+            }).dropna()
+            df["dv_pct"] = df["dv_pct"].clip(0, 15)
+            return df
+
+        # fallback: sentetik
+        rng = np.random.default_rng(0)
+        n = 3000
+        L = rng.uniform(10, 3000, n)
+        P = rng.uniform(1,  600,  n)
+        k_vals = rng.normal(loc=k_const if k_const > 0 else 1e-4,
+                            scale=0.25 * (k_const if k_const > 0 else 1e-4),
+                            size=n)
+        k_vals = np.clip(k_vals, 1e-6, 1.0)
+        dv = k_vals * L * P * rng.normal(1.0, 0.03, size=n)  # küçük ölçüm hatası
+        dv = np.clip(dv, 0, 15)  # max %15
+        return pd.DataFrame({"L_m": L, "P_kw": P, "k": k_vals, "dv_pct": dv})
+
+    train_df = build_training_df(ext_df)
+
+    # ------- Model eğitimi (LightGBM yoksa RF'ye düş) -------
+    @st.cache_resource
+    def train_regressor(df: pd.DataFrame):
+        X = df[["L_m", "P_kw", "k"]]
+        y = df["dv_pct"]
+        try:
+            from lightgbm import LGBMRegressor
+            reg = LGBMRegressor(n_estimators=400, learning_rate=0.05, num_leaves=64, random_state=42)
+        except Exception:
+            from sklearn.ensemble import RandomForestRegressor
+            reg = RandomForestRegressor(n_estimators=350, random_state=42, n_jobs=-1)
+        reg.fit(X, y)
+        return reg
+
+    try:
+        reg = train_regressor(train_df)
+    except Exception:
+        reg = None
+
+    # ------- Örnek tahmin (girdi kutularına göre) -------
+    dv_formula = vdrop_kLN(L_in, N_in, k_in)
     if reg is not None:
-        Xb = dloc[["Mesafe (m)", "Yük (kW)"]].copy()
-        Xb["k"] = k_in
-        dloc["Tahmin (%)"] = reg.predict(Xb)
+        Xq = pd.DataFrame([{"L_m": L_in, "P_kw": N_in, "k": k_in}])
+        dv_ai = float(reg.predict(Xq)[0])
+    else:
+        dv_ai = float("nan")
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("📐 Formül (k·L·N)", f"%{dv_formula:.2f}")
+    m2.metric("🤖 AI Tahmini", f"%{dv_ai:.2f}" if np.isfinite(dv_ai) else "—")
+    m3.metric("🎯 Eşik", f"%{thr_pct:.2f}")
+    durum_val = (dv_ai if np.isfinite(dv_ai) else dv_formula) <= thr_pct
+    m4.metric("Durum", "✅ Uygun" if durum_val else "❌ Uygunsuz")
+
+    st.divider()
+
+    # ================== Trafo bazlı karşılaştırma (5–15 direk, %15 clip) ==================
+    st.markdown("### 🔌 Trafo")
+
+    # Trafo seçimi
+    trafo_names = trafo_df["Montaj Yeri"].dropna().astype(str).unique().tolist()
+    if len(trafo_names) == 0:
+        st.info("Trafo verisi yok."); st.stop()
+    trafo_sel = st.selectbox("Trafo Seçin", options=trafo_names)
+
+    # Seçilen trafo konumu
+    trow = trafo_df[trafo_df["Montaj Yeri"].astype(str) == trafo_sel].iloc[0]
+    t_coord = (float(trow["Enlem"]), float(trow["Boylam"]))
+
+    # Direk verisi
+    dloc = direk_df.dropna(subset=["Enlem", "Boylam"]).copy()
+    if len(dloc) == 0:
+        st.error("Direk verisi yok."); st.stop()
+
+    # Mesafe (m) — seçilen trafoya
+    dloc["Mesafe (m)"] = dloc.apply(
+        lambda r: geodesic((float(r["Enlem"]), float(r["Boylam"])), t_coord).meters, axis=1
+    )
+
+    # Bu trafo için analiz edilecek direk sayısı (5–15)
+    max_n = st.slider("Bu trafo için kaç direk analiz edilsin?", 5, 15, 12, 1)
+    dloc = dloc.sort_values("Mesafe (m)").head(int(max_n)).reset_index(drop=True)
+
+    # Yük (kW) — yoksa sentetik üret
+    rng = np.random.default_rng(42)
+    if "Yük (kW)" in dloc.columns:
+        dloc["Yük (kW)"] = pd.to_numeric(dloc["Yük (kW)"], errors="coerce")
+    else:
+        dloc["Yük (kW)"] = np.nan
+    dloc["Yük (kW)"] = dloc["Yük (kW)"].fillna(rng.integers(10, 300, size=len(dloc)))
+
+    # --------- VEKTÖRİZE HESAPLAR ---------
+    # Gerçek (k·L·N)
+    L_vec = pd.to_numeric(dloc["Mesafe (m)"], errors="coerce")
+    N_vec = pd.to_numeric(dloc["Yük (kW)"],   errors="coerce")
+    dloc["Gerçek (%)"] = (k_in * L_vec * N_vec).astype(float)
+
+    # AI Tahmini
+    if reg is not None:
+        Xb = pd.DataFrame({
+            "L_m": L_vec,
+            "P_kw": N_vec,
+            "k":   float(k_in)
+        })
+        dloc["Tahmin (%)"] = pd.Series(reg.predict(Xb), index=dloc.index)
     else:
         dloc["Tahmin (%)"] = np.nan
 
-    # --- Sağlamlaştırma: [0, 15]% aralığına kırp ve NaN'leri temizle ---
+    # Sağlamlaştırma: [0, 15]% aralığına kırp
     dloc["Gerçek (%)"]  = dloc["Gerçek (%)"].clip(lower=0, upper=15)
     dloc["Tahmin (%)"]  = dloc["Tahmin (%)"].clip(lower=0, upper=15)
 
-    # Etiket: Direk Kodu varsa onu kullan; yoksa D1..DN üret
+    # Etiket: Direk Kodu varsa, yoksa D1..DN
     if "Direk Kodu" in dloc.columns:
-        etiket = dloc["Direk Kodu"].astype(str).fillna("").str.strip()
-        fallback = [f"D{i+1}" for i in range(len(dloc))]
-        etiket = np.where((etiket == "") | (etiket == "nan") | (etiket.str.lower() == "none"),
-                          fallback, etiket)
-        dloc["Etiket"] = etiket
+        lab = dloc["Direk Kodu"].astype(str).str.strip()
+        lab = lab.where(~lab.isin(["", "nan", "None", "NONE"]), None)
     else:
+        lab = None
+    if lab is None or lab.isna().all():
         dloc["Etiket"] = [f"D{i+1}" for i in range(len(dloc))]
+    else:
+        fallback = pd.Series([f"D{i+1}" for i in range(len(dloc))], index=dloc.index)
+        dloc["Etiket"] = lab.fillna(fallback)
 
-    # --- Performans metrikleri (küçük örnek boyutlarına tolerans) ---
-    valid = dloc[["Gerçek (%)", "Tahmin (%)"]].dropna()
-    r2 = mse = np.nan
-    if len(valid) >= 1:
-        from sklearn.metrics import mean_squared_error, r2_score
-        mse = mean_squared_error(valid["Gerçek (%)"], valid["Tahmin (%)"])
-        if len(valid) >= 2:
-            r2 = r2_score(valid["Gerçek (%)"], valid["Tahmin (%)"])
+    # Geçerli satırlar
+    dplot = dloc.dropna(subset=["Gerçek (%)", "Tahmin (%)"])
 
-    # --- Grafik: Gerçek vs Tahmin (NaN satırlarını at) ---
-    plot_df = dloc.dropna(subset=["Gerçek (%)", "Tahmin (%)"])[["Etiket", "Gerçek (%)", "Tahmin (%)"]]
+    # Performans metrikleri (küçük örneklerde toleranslı)
+    from sklearn.metrics import r2_score, mean_squared_error
+    r2  = r2_score(dplot["Gerçek (%)"], dplot["Tahmin (%)"]) if len(dplot) >= 2 else float("nan")
+    mse = mean_squared_error(dplot["Gerçek (%)"], dplot["Tahmin (%)"]) if len(dplot) >= 1 else float("nan")
+
+    # Grafik: Gerçek vs Tahmin (tek eksen, sade)
     import plotly.express as px
     fig_cmp = px.line(
-        plot_df.melt(id_vars="Etiket", var_name="Değişken", value_name="Gerilim Düşümü (%)"),
+        dplot[["Etiket","Gerçek (%)","Tahmin (%)"]].melt(id_vars="Etiket", var_name="Değişken", value_name="Gerilim Düşümü (%)"),
         x="Etiket", y="Gerilim Düşümü (%)", color="Değişken",
         markers=True, template="plotly_white",
         title=f"{trafo_sel} — Gerilim Düşümü (Formül vs AI)"
@@ -537,11 +671,11 @@ elif selected == "Gerilim Düşümü":
     fig_cmp.update_layout(xaxis_title="Direk", yaxis_title="Gerilim Düşümü (%)")
     st.plotly_chart(fig_cmp, use_container_width=True)
 
-    # --- Metrikleri grafiğin ALTINA yaz ---
+    # Metrikleri grafiğin ALTINA yaz
     st.caption(
         f"**R²:** {('—' if not np.isfinite(r2) else f'{r2:.3f}')}  |  "
         f"**MSE:** {('—' if not np.isfinite(mse) else f'{mse:.4f}')}  |  "
-        f"**Direk sayısı:** {len(plot_df)}"
+        f"**Direk sayısı:** {len(dplot)}"
     )
 
     
