@@ -582,7 +582,6 @@ elif selected == "Gerilim Düşümü":
     m4.metric("Durum", "✅ Uygun" if durum_val else "❌ Uygunsuz")
 
     st.divider()
-
 # ================== Trafo bazlı basit karşılaştırma (FİX 5 DİREK) ==================
 st.markdown("### 🔌 Trafo Seçin")
 
