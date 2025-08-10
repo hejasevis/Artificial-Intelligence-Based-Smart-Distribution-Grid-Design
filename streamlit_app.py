@@ -551,23 +551,41 @@ elif selected == "Gerilim Düşümü":
     else:
         r2 = mse = float("nan")
 
-    cA, cB = st.columns(2)
-    cA.metric("R²", f"{r2:.3f}" if np.isfinite(r2) else "—")
-    cB.metric("MSE", f"{mse:.4f}" if np.isfinite(mse) else "—")
-
-    # 7) Grafik: Direk Kodu bazlı, Gerçek vs Tahmin (yan yana bar)
+    # 7) Grafik: Çizgi grafiği (Direk Kodu bazlı)
     import plotly.express as px
     x_labels = dloc["Direk Kodu"].astype(str).fillna("—")
-    plot_df = dloc.assign(**{"Direk": x_labels})[["Direk", "Gerçek (%)", "Tahmin (%)"]].melt(
-        id_vars="Direk", var_name="Yöntem", value_name="Gerilim Düşümü (%)"
-    )
-    fig_cmp = px.bar(
-        plot_df, x="Direk", y="Gerilim Düşümü (%)", color="Yöntem",
-        barmode="group", template="plotly_white", title=f"{trafo_sel} — 5 En Yakın Direk: Gerçek vs AI"
+    plot_df = dloc.assign(**{"Direk": x_labels})[["Direk", "Gerçek (%)", "Tahmin (%)"]]
+
+    fig_cmp = px.line(
+        plot_df,
+        x="Direk",
+        y=["Gerçek (%)", "Tahmin (%)"],
+        markers=True,
+        template="plotly_white",
+        title=f"{trafo_sel} — 5 En Yakın Direk: Gerçek vs AI"
     )
     fig_cmp.add_hline(y=thr_pct, line_dash="dot", annotation_text=f"Eşik %{thr_pct:.2f}")
-    fig_cmp.update_layout(xaxis_title="Direk", yaxis_title="Gerilim Düşümü (%)")
+    fig_cmp.update_layout(
+        xaxis_title="Direk",
+        yaxis_title="Gerilim Düşümü (%)"
+    )
     st.plotly_chart(fig_cmp, use_container_width=True)
+
+    # 8) Expander içinde R², MSE ve tablo
+    with st.expander("📊 Detaylı Sonuçlar"):
+        st.markdown(f"**R²:** {r2:.3f}" if np.isfinite(r2) else "**R²:** —")
+        st.markdown(f"**MSE:** {mse:.4f}" if np.isfinite(mse) else "**MSE:** —")
+        st.dataframe(
+            dloc[["Direk Kodu","Mesafe (m)","Yük (kW)","Gerçek (%)","Tahmin (%)"]]
+            .style.format({
+                "Mesafe (m)":"{:.0f}",
+                "Yük (kW)":"{:.0f}",
+                "Gerçek (%)":"{:.2f}",
+                "Tahmin (%)":"{:.2f}"
+            }),
+            use_container_width=True
+        )
+
 
     # (Opsiyonel) Kısa tablo
     with st.expander("Detay Tablo (5 Direk)"):
@@ -577,9 +595,6 @@ elif selected == "Gerilim Düşümü":
             use_container_width=True
         )
   
-
-
-
 
 # ===================== SAYFA 3: Forecasting =====================
 elif selected == "Forecasting":
