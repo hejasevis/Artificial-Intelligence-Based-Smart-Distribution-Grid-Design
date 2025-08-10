@@ -324,7 +324,7 @@ if selected == "Talep Verisi Girişi":
     st_folium(m2, height=620, width="100%", key="result_map_basic")
 
 # ===================== SAYFA 2: Gerilim Düşümü — Gerçek Veri & AI =====================
-elif selected == "Gerilim Düşümü":
+elif selected == "Gerilim Düşümü Analizi":
     st.subheader("📉 Gerilim Düşümü ")
 
     # ------- Girdiler (sayfa içi) -------
