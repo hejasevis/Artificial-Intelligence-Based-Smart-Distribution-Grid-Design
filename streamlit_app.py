@@ -491,105 +491,69 @@ elif selected == "Gerilim Düşümü":
 
     st.divider()
 
-    # ================== TRAFO BAZLI FARK ANALİZİ (seç-izle) ==================
-    st.markdown("### 🔌 Trafo Bazında: Formül vs AI Fark Analizi")
+    # ================== TRAFO BAZLI KARŞILAŞTIRMA (basit) ==================
+    st.markdown("### 🔌 Trafo Seçin")
 
-    # Trafo seçimi (sayfa içi)
     trafo_names = trafo_df["Montaj Yeri"].dropna().astype(str).unique().tolist()
     if len(trafo_names) == 0:
         st.info("Trafo verisi yok."); st.stop()
 
-    c_t1, c_t2 = st.columns([2,1])
-    with c_t1:
-        sel_trafos = st.multiselect("Trafo seç (birden fazla)", options=trafo_names, default=trafo_names[:3])
-    with c_t2:
-        top_n = st.number_input("Her trafo için kaç direk gösterilsin", 5, 100, 20, 1)
+    trafo_sel = st.selectbox("Trafo Seçin", options=trafo_names)
 
-    if len(sel_trafos) == 0:
-        st.info("En az bir trafo seç.")
-        st.stop()
+    # Seçilen trafo koordinatı
+    trow = trafo_df[trafo_df["Montaj Yeri"].astype(str) == trafo_sel].iloc[0]
+    t_coord = (float(trow["Enlem"]), float(trow["Boylam"]))
 
-    # Direk verisi
-    direk_clean_all = direk_df.dropna(subset=["Enlem", "Boylam"]).copy()
-    if len(direk_clean_all) == 0:
-        st.error("Direk verisi yok."); st.stop()
+    # Direk verisi (tüm direkler, o trafoya mesafe)
+    dloc = direk_df.dropna(subset=["Enlem", "Boylam"]).copy()
+    dloc["Mesafe (m)"] = dloc.apply(
+        lambda r: geodesic((float(r["Enlem"]), float(r["Boylam"])), t_coord).meters, axis=1
+    )
 
-    # Seçili trafolar için hesapla
-    all_rows = []
-    for tname in sel_trafos:
-        trow = trafo_df[trafo_df["Montaj Yeri"].astype(str) == tname].iloc[0]
-        t_coord = (float(trow["Enlem"]), float(trow["Boylam"]))
-        df_local = direk_clean_all.copy()
-
-        # Mesafe (m)
-        df_local["Mesafe (m)"] = df_local.apply(
-            lambda r: geodesic((float(r["Enlem"]), float(r["Boylam"])), t_coord).meters, axis=1
+    # Yük (kW) yoksa sentetik
+    rng = np.random.default_rng(42)
+    if "Yük (kW)" in dloc.columns:
+        dloc["Yük (kW)"] = pd.to_numeric(dloc["Yük (kW)"], errors="coerce").fillna(
+            rng.integers(10, 300, size=len(dloc))
         )
+    else:
+        dloc["Yük (kW)"] = rng.integers(10, 300, size=len(dloc))
 
-        # Yük (kW) yoksa üret
-        rng = np.random.default_rng(42)
-        if "Yük (kW)" in df_local.columns:
-            df_local["Yük (kW)"] = pd.to_numeric(df_local["Yük (kW)"], errors="coerce").fillna(
-                rng.integers(10, 300, size=len(df_local))
-            )
-        else:
-            df_local["Yük (kW)"] = rng.integers(10, 300, size=len(df_local))
+    # Gerçek (formül) ve AI tahmini
+    def vdrop_kLN(L_m, P_kw, k): return float(k) * float(L_m) * float(P_kw)
 
-        # Formül ve AI
-        df_local["Gerilim Düşümü (Formül, %)"] = df_local.apply(
-            lambda r: vdrop_kLN(r["Mesafe (m)"], r["Yük (kW)"], k_in), axis=1
-        )
-        if reg is not None:
-            Xb = df_local[["Mesafe (m)", "Yük (kW)"]].copy()
-            Xb["k"] = k_in
-            df_local["Gerilim Düşümü (AI, %)"] = reg.predict(Xb)
-        else:
-            df_local["Gerilim Düşümü (AI, %)"] = np.nan
+    dloc["Gerçek (%)"] = dloc.apply(lambda r: vdrop_kLN(r["Mesafe (m)"], r["Yük (kW)"], k_in), axis=1)
+    if reg is not None:
+        Xb = dloc[["Mesafe (m)", "Yük (kW)"]].copy()
+        Xb["k"] = k_in
+        dloc["Tahmin (%)"] = reg.predict(Xb)
+    else:
+        dloc["Tahmin (%)"] = np.nan
 
-        df_local["Fark (AI–Formül, %)"] = df_local["Gerilim Düşümü (AI, %)"] - df_local["Gerilim Düşümü (Formül, %)"]
-        df_local["Trafo"] = tname
+    # Basit performans (yalnızca sayısal değerler)
+    valid = dloc[["Gerçek (%)", "Tahmin (%)"]].dropna()
+    if len(valid) >= 5:
+        from sklearn.metrics import r2_score, mean_squared_error
+        r2 = r2_score(valid["Gerçek (%)"], valid["Tahmin (%)"])
+        mse = mean_squared_error(valid["Gerçek (%)"], valid["Tahmin (%)"])
+    else:
+        r2 = mse = float("nan")
 
-        # en büyük |fark|’a göre top_n
-        df_local = df_local.reindex(df_local["Fark (AI–Formül, %)"].abs().sort_values(ascending=False).index).head(int(top_n))
-        all_rows.append(df_local)
+    cA, cB = st.columns(2)
+    cA.metric("R²", f"{r2:.3f}" if np.isfinite(r2) else "—")
+    cB.metric("MSE", f"{mse:.4f}" if np.isfinite(mse) else "—")
 
-    res = pd.concat(all_rows, ignore_index=True)
-
-    # Tablo (gruplu gösterim)
-    st.dataframe(
-        res[["Trafo","Direk Kodu","Mesafe (m)","Yük (kW)","Gerilim Düşümü (Formül, %)","Gerilim Düşümü (AI, %)","Fark (AI–Formül, %)"]]
-        .sort_values(["Trafo","Fark (AI–Formül, %)"], ascending=[True, False])
-        .style.format({
-            "Mesafe (m)":"{:.0f}", "Yük (kW)":"{:.0f}",
-            "Gerilim Düşümü (Formül, %)":"{:.2f}",
-            "Gerilim Düşümü (AI, %)":"{:.2f}",
-            "Fark (AI–Formül, %)":"{:+.2f}"
-        }),
-        use_container_width=True
+    # Çizgi grafik: Gerçek vs Tahmin (tek eksen)
+    plot_df = dloc[["Gerçek (%)", "Tahmin (%)"]].reset_index(drop=True).head(220)  # okunabilirlik için ilk 220
+    plot_df = plot_df.reset_index().rename(columns={"index": "Veri Noktası"})
+    fig_cmp = px.line(
+        plot_df.melt(id_vars="Veri Noktası", var_name="Değişken", value_name="Gerilim Düşümü (%)"),
+        x="Veri Noktası", y="Gerilim Düşümü (%)", color="Değişken",
+        markers=True, template="plotly_white", title="Gerilim Düşümü Karşılaştırması"
     )
+    fig_cmp.add_hline(y=thr_pct, line_dash="dot", annotation_text=f"Eşik %{thr_pct:.2f}")
+    st.plotly_chart(fig_cmp, use_container_width=True)
 
-    # Grafik: her trafo için Formül vs AI bar (yan yana)
-    plot_df = res[["Trafo","Direk Kodu","Gerilim Düşümü (Formül, %)","Gerilim Düşümü (AI, %)"]].melt(
-        id_vars=["Trafo","Direk Kodu"], var_name="Yöntem", value_name="Düşüm (%)"
-    )
-    fig_bar = px.bar(
-        plot_df, x="Direk Kodu", y="Düşüm (%)", color="Yöntem", barmode="group",
-        facet_col="Trafo", facet_col_wrap=2, template="plotly_white",
-        title="Seçili Trafolar — Direk Bazında Gerilim Düşümü (Formül vs AI)"
-    )
-    fig_bar.add_hline(y=thr_pct, line_dash="dot", annotation_text=f"Eşik %{thr_pct:.2f}")
-    fig_bar.update_layout(xaxis_tickangle=25)
-    st.plotly_chart(fig_bar, use_container_width=True)
-
-    # Grafik: Fark (AI–Formül)
-    fig_diff = px.bar(
-        res, x="Direk Kodu", y="Fark (AI–Formül, %)", color="Trafo",
-        facet_col="Trafo", facet_col_wrap=2, template="plotly_white",
-        title="Seçili Trafolar — AI – Formül Farkı (%)"
-    )
-    fig_diff.add_hline(y=0, line_dash="dot")
-    fig_diff.update_layout(xaxis_tickangle=25)
-    st.plotly_chart(fig_diff, use_container_width=True)
 
 
 # ===================== SAYFA 3: Forecasting =====================
