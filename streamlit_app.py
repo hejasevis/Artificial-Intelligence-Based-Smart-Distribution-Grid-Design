@@ -515,8 +515,8 @@ elif selected == "Gerilim Düşümü":
         lambda r: geodesic((float(r["Enlem"]), float(r["Boylam"])), t_coord).meters, axis=1
     )
 
-    # Bu trafo için analiz edilecek direk sayısı (5–15)
-    max_n = st.slider("Bu trafo için kaç direk analiz edilsin?", 5, 15, 12, 1)
+    # Bu trafo için analiz edilecek direk sayısı (1-12)
+    max_n = st.slider("Bu trafo için kaç direk analiz edilsin?", 1, 12, 12, 1)
     dloc = dloc.sort_values("Mesafe (m)").head(int(max_n)).reset_index(drop=True)
 
     # Yük (kW) — yoksa sentetik
@@ -569,7 +569,7 @@ elif selected == "Gerilim Düşümü":
     fig_cmp = px.line(
         plot_df, x="Etiket", y="Gerilim Düşümü (%)", color="Değişken",
         markers=True, template="plotly_white",
-        title=f"{trafo_sel} — Gerilim Düşümü (Formül vs AI)"
+        title=f"{trafo_sel} — Gerilim Düşümü (Hesaplama vs AI)"
     )
     fig_cmp.add_hline(y=thr_pct, line_dash="dot", annotation_text=f"Eşik %{thr_pct:.2f}")
     fig_cmp.update_layout(xaxis_title="Direk", yaxis_title="Gerilim Düşümü (%)")
