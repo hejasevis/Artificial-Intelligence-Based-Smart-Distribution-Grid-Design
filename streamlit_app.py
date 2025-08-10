@@ -590,102 +590,140 @@ elif selected == "Gerilim Düşümü":
         )
 
 
-# =================== SAYFA 3: Yük Tahmini (Prophet) ===================
-elif selected == "Yük Tahmini":
-    st.subheader("📈 Yük Tahmini — Prophet Modeli")
+# ===================== SAYFA 3: Forecasting (Sadece Prophet, doğal tarih, metrikler altta) =====================
+elif selected == "Forecasting":
+    st.subheader("📈 Yük Tahmini (Forecasting) — Prophet")
 
-    # -------------------- Veri Yükleme --------------------
+    # ---------- Girdiler ----------
+    c1, c2, c3 = st.columns([1,1,1])
+    with c1:
+        horizon = st.number_input("Tahmin ufku (gün)", 7, 180, 30, 1)
+    with c2:
+        holdout_days = st.number_input("Test penceresi (gün)", 7, 90, 30, 1)
+    with c3:
+        agg = st.selectbox("Zaman toplaması", ["Günlük Ortalama", "Günlük Toplam"], index=0)
+
+    # ---------- Veri: smart_grid_dataset.csv ----------
+    if ext_df is None or ext_df.empty:
+        st.error("smart_grid_dataset.csv bulunamadı/boş."); st.stop()
+
+    # Kolon tespiti (timestamp & load_kw öncelikli)
+    cols_lower = {c.lower(): c for c in ext_df.columns}
+    time_col = next((cols_lower[k] for k in ["timestamp","datetime","date","tarih","ds"] if k in cols_lower), None)
+    if time_col is None:
+        for c in ext_df.columns:
+            parsed = pd.to_datetime(ext_df[c], errors="coerce")
+            if parsed.notna().mean() > 0.6:
+                time_col = c; break
+
+    load_col = next((cols_lower[k] for k in ["load_kw","load","power_kw","kw","value","y"] if k in cols_lower), None)
+    if load_col is None:
+        numeric_candidates = [c for c in ext_df.columns if pd.api.types.is_numeric_dtype(ext_df[c])]
+        load_col = numeric_candidates[0] if numeric_candidates else None
+
+    if time_col is None or load_col is None:
+        st.error("CSV'de zaman/yük kolonları tespit edilemedi."); st.stop()
+
+    df_raw = ext_df[[time_col, load_col]].rename(columns={time_col: "ds", load_col: "y"}).copy()
+    df_raw["ds"] = pd.to_datetime(df_raw["ds"], errors="coerce")
+    df_raw["y"]  = pd.to_numeric(df_raw["y"], errors="coerce")
+    df_raw = df_raw.dropna(subset=["ds","y"]).sort_values("ds")
+    if df_raw.empty:
+        st.error("Seçilen kolonlardan tarih/yük üretilemedi."); st.stop()
+
+    # Günlük toplama
+    if "Ortalama" in agg:
+        series = df_raw.set_index("ds")["y"].resample("D").mean().interpolate("time")
+    else:
+        series = df_raw.set_index("ds")["y"].resample("D").sum().interpolate("time")
+    ts = series.reset_index().rename(columns={"index":"ds"})
+    if len(ts) <= holdout_days + 30:
+        st.error("Zaman serisi kısa. Test penceresini küçült veya veri aralığını artır."); st.stop()
+
+    # Train/Test
+    cutoff = ts["ds"].max() - pd.Timedelta(days=int(holdout_days))
+    train = ts[ts["ds"] <= cutoff].copy()
+    test  = ts[ts["ds"] >  cutoff].copy()
+
+    # ===== Prophet =====
     try:
-        df = pd.read_csv("smart_grid_dataset.csv")
-    except FileNotFoundError:
-        st.error("❌ 'smart_grid_dataset.csv' bulunamadı.")
-        st.stop()
+        from prophet import Prophet
+    except Exception as e:
+        st.error(f"Prophet yüklenemedi: {e} (requirements.txt'e 'prophet' ekleyin)"); st.stop()
 
-    # Zorunlu kolon kontrolü
-    if not {"timestamp", "load_kw"}.issubset(df.columns):
-        st.error("❌ Dataset'te 'timestamp' ve 'load_kw' kolonları olmalı.")
-        st.stop()
+    m = Prophet(seasonality_mode="additive",
+                yearly_seasonality=False, daily_seasonality=False)
+    m.add_seasonality(name="weekly", period=7, fourier_order=6)
 
-    # Prophet formatı
-    df = df.rename(columns={"timestamp": "ds", "load_kw": "y"})
-    df["ds"] = pd.to_datetime(df["ds"])
-    df = df.sort_values("ds")
+    m.fit(train.rename(columns={"ds":"ds","y":"y"}))
 
-    # -------------------- Train / Test Bölme --------------------
-    train_size = int(len(df) * 0.8)
-    train = df.iloc[:train_size]
-    test = df.iloc[train_size:]
+    # Test tahmini
+    test_pred = m.predict(test[["ds"]])
+    yhat_test = pd.Series(test_pred["yhat"].values, index=test["ds"].values)
 
-    # -------------------- Prophet Modeli --------------------
-    model = Prophet(yearly_seasonality=True, daily_seasonality=True)
-    model.fit(train)
+    # İleri tahmin
+    future = m.make_future_dataframe(periods=int(horizon), freq="D", include_history=False)
+    fut = m.predict(future)
+    fc = pd.DataFrame({
+        "ds": fut["ds"],
+        "yhat": fut["yhat"],
+        "yhat_low": fut["yhat_lower"],
+        "yhat_high": fut["yhat_upper"]
+    })
 
-    future = model.make_future_dataframe(periods=len(test), freq="D")
-    forecast = model.predict(future)
+    # ---------- Grafik ----------
+    import plotly.graph_objects as go
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=train["ds"], y=train["y"], mode="lines", name="Gerçek (Train)"))
+    fig.add_trace(go.Scatter(x=test["ds"],  y=test["y"],  mode="lines", name="Gerçek (Test)"))
+    fig.add_trace(go.Scatter(x=yhat_test.index, y=yhat_test.values, mode="lines", name="Test Tahmini"))
+    fig.add_trace(go.Scatter(x=fc["ds"], y=fc["yhat"], mode="lines", name="İleri Tahmin"))
+    fig.add_trace(go.Scatter(x=fc["ds"], y=fc["yhat_low"],  mode="lines", name="Alt Band", line=dict(dash="dot")))
+    fig.add_trace(go.Scatter(x=fc["ds"], y=fc["yhat_high"], mode="lines", name="Üst Band", line=dict(dash="dot")))
+    fig.update_layout(template="plotly_white",
+                      title="Prophet — Geçmiş, Test ve İleri Tahmin",
+                      xaxis_title="Tarih", yaxis_title="kW", legend_title="Seri")
+    st.plotly_chart(fig, use_container_width=True)
 
-    # -------------------- Sonuçları Birleştir --------------------
-    merged = test.merge(
-        forecast[["ds", "yhat"]],
-        on="ds",
-        how="left"
+    # ---------- İndirilebilir çıktı ----------
+    out = fc[["ds","yhat","yhat_low","yhat_high"]].rename(
+        columns={"ds":"tarih","yhat":"tahmin_kw","yhat_low":"alt","yhat_high":"üst"}
     )
+    st.download_button("📥 Tahmini CSV indir",
+                       data=out.to_csv(index=False).encode("utf-8"),
+                       file_name="forecast_prophet.csv", mime="text/csv")
 
-    # -------------------- Doğruluk Metriği --------------------
-    rmse = np.sqrt(mean_squared_error(merged["y"], merged["yhat"]))
-    mae = mean_absolute_error(merged["y"], merged["yhat"])
-    mape = np.mean(np.abs((merged["y"] - merged["yhat"]) / merged["y"])) * 100
-    rmsep = (rmse / np.mean(merged["y"])) * 100
+    st.divider()
 
-    # -------------------- Grafik --------------------
-    fig, ax = plt.subplots(figsize=(12, 5))
-    ax.plot(train["ds"], train["y"], label="Train", color="blue")
-    ax.plot(test["ds"], test["y"], label="Test - Gerçek", color="black")
-    ax.plot(merged["ds"], merged["yhat"], label="Tahmin (Prophet)", color="red")
-    ax.set_title("Yük Tahmini (Prophet)")
-    ax.set_xlabel("Tarih")
-    ax.set_ylabel("Yük (kW)")
-    ax.legend()
-    st.pyplot(fig)
+    # ---------- Metrikler (SAYFANIN ALTINDA) ----------
+    import numpy as np
+    def _rmse(y_true, y_pred):
+        yt, yp = np.array(y_true), np.array(y_pred)
+        return float(np.sqrt(np.mean((yt - yp)**2)))
+    def _mae(y_true, y_pred):
+        yt, yp = np.array(y_true), np.array(y_pred)
+        return float(np.mean(np.abs(yt - yp)))
+    def _mape(y_true, y_pred):
+        yt, yp = np.array(y_true), np.array(y_pred)
+        mask = yt != 0
+        return float(np.mean(np.abs((yt[mask]-yp[mask])/yt[mask]))*100) if mask.sum() else np.nan
+    def _rmse_pct(y_true, y_pred):
+        rm = _rmse(y_true, y_pred)
+        denom = float(np.mean(np.abs(y_true)))
+        return float(rm/denom*100) if denom > 0 else np.nan
 
-    # -------------------- Alt bölüm: Model Sonuçları (şık kartlar) --------------------
-    mape_target = 1.0   # %1 hedef
-    rmsep_target = 3.0  # %3 hedef
+    y_test = test.set_index("ds")["y"]
+    rmse  = _rmse(y_test.values, yhat_test.values)
+    mae   = _mae(y_test.values, yhat_test.values)
+    mape  = _mape(y_test.values, yhat_test.values)
+    rmsep = _rmse_pct(y_test.values, yhat_test.values)
 
-    ok_mape  = (mape  <= mape_target) if np.isfinite(mape)  else False
-    ok_rmsep = (rmsep <= rmsep_target) if np.isfinite(rmsep) else False
-
-    def pct(x):
-        return ("—" if not np.isfinite(x) else f"%{x:,.2f}")
-
-    cards_html = f"""
-    <div style="margin-top:8px"></div>
-    <h3 style="margin:0 0 10px 0;">📊 Model Sonuçları</h3>
-    <div style="
-        display:grid;
-        grid-template-columns: repeat(4, minmax(0,1fr));
-        gap:12px;">
-        <div style="background:#0f172a; padding:14px 16px; border-radius:14px; color:#e2e8f0;">
-            <div style="font-size:12px; opacity:.8;">RMSE</div>
-            <div style="font-size:22px; font-weight:700; color:#fff;">{rmse:,.2f}</div>
-        </div>
-        <div style="background:#0f172a; padding:14px 16px; border-radius:14px; color:#e2e8f0;">
-            <div style="font-size:12px; opacity:.8;">MAE</div>
-            <div style="font-size:22px; font-weight:700; color:#fff;">{mae:,.2f}</div>
-        </div>
-        <div style="background:{'#0ea65d' if ok_mape else '#ef4444'}; padding:14px 16px; border-radius:14px; color:#fff;">
-            <div style="font-size:12px; opacity:.9;">MAPE</div>
-            <div style="font-size:22px; font-weight:800;">{pct(mape)}</div>
-            <div style="font-size:12px; opacity:.9;">Hedef &lt; %{mape_target:.0f}</div>
-        </div>
-        <div style="background:{'#0ea65d' if ok_rmsep else '#ef4444'}; padding:14px 16px; border-radius:14px; color:#fff;">
-            <div style="font-size:12px; opacity:.9;">RMSE%</div>
-            <div style="font-size:22px; font-weight:800;">{pct(rmsep)}</div>
-            <div style="font-size:12px; opacity:.9;">Hedef &lt; %{rmsep_target:.0f}</div>
-        </div>
-    </div>
-    """
-
-    st.markdown(cards_html, unsafe_allow_html=True)
+    with st.expander("📊 Model Sonuçları"):
+        cM1, cM2, cM3, cM4 = st.columns(4)
+        cM1.metric("RMSE", f"{rmse:,.2f}")
+        cM2.metric("MAE",  f"{mae:,.2f}")
+        cM3.metric("MAPE", f"%{mape:,.2f}" if np.isfinite(mape) else "—")
+        cM4.metric("RMSE%", f"%{rmsep:,.2f}" if np.isfinite(rmsep) else "—")
 
 
 
