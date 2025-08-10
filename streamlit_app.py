@@ -727,7 +727,7 @@ elif selected == "Forecasting":
 
 
 
-# ===================== SAYFA 4: Arıza / Anomali ===================
+# ===================== SAYFA 4: Arıza / Anomali ====================
 elif selected == "Arıza/Anomali":
     st.subheader("🚨 Arıza & Anomali Tespiti — Demo")
     st.caption("IsolationForest ile sentetik V-I-P üzerinde anomali işaretleme.")
