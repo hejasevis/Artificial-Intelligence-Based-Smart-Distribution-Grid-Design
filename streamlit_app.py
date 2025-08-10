@@ -28,7 +28,7 @@ st.title("🔌 Yapay Zeka ile Akıllı Dağıtım Şebekesi Tasarımı")
 
 selected = option_menu(
     menu_title="",
-    options=["Talep Girdisi", "Gerilim Düşümü", "Forecasting", "Arıza/Anomali"],
+    options=["Talep Verisi Girişi", "Gerilim Düşümü Analizi", "Talep / Tüketim Tahmini", "Arıza ve Anomali Tespiti"],
     icons=["geo-alt-fill", "activity", "graph-up-arrow", "exclamation-triangle-fill"],
     menu_icon="cast",
     default_index=0,
@@ -155,7 +155,7 @@ def build_route_and_stats(demand_latlon, trafo_latlon, poles_latlon, max_span=40
         return final_path, total_len_m, 0, 1, [total_len_m]
 
 # ===================== SAYFA 1: Talep Girdisi =====================
-if selected == "Talep Girdisi":
+if selected == "Talep Verisi Girişi":
     st.sidebar.header("⚙️ Hat Parametreleri")
     max_span     = st.sidebar.number_input("Maks. direk aralığı (m)", 20, 120, 40, 5)
     snap_radius  = st.sidebar.number_input("Mevcut direğe snap yarıçapı (m)", 5, 120, 30, 5)
@@ -513,7 +513,7 @@ elif selected == "Gerilim Düşümü":
 
 
 # ===================== SAYFA 3: Forecasting (Zaman Serisi Tahmini) =====================
-elif selected == "Zaman Serisi Tahmini":
+elif selected == "Talep / Tüketim Tahmini":
     st.subheader("📈 Zaman Serisi Tahmini ")
 
     c1, c2, c3 = st.columns([1,1,1])
@@ -626,7 +626,7 @@ elif selected == "Zaman Serisi Tahmini":
         cM4.metric("RMSE%", f"%{rmsep:,.2f}" if np.isfinite(rmsep) else "—")
 
 # ===================== SAYFA 4: Arıza / Anomali Tespiti (sabit parametreler + şık metrikler) =====================
-elif selected == "Arıza/Anomali":
+elif selected == "Arıza ve Anomali Tespiti":
     st.subheader("🚨 Arıza & Anomali Tespiti")
 
     # ---- Sabitler (kullanıcıdan sormuyoruz) ----
