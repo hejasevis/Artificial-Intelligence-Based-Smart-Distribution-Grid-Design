@@ -1,5 +1,4 @@
-# Smart Distribution Grid – Demo App (Streamlit)
-
+# Artificial Intelligence Based Smart Distribution Grid Design
 This repository contains a **Streamlit Project** for an **AI-Assisted Smart Distribution Grid Design**. It visualizes **transformer–pole–customer** relations on a map, builds routes, computes a simplified **voltage drop score**, and showcases **anomaly detection / forecasting** with lightweight ML models.
 
 ## Features
