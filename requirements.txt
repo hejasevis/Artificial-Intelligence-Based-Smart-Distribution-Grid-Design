@@ -10,9 +10,5 @@ pyproj
 scipy
 plotly
 scikit-learn
-statsmodels
-lightgbm
-shap
 prophet
-statsmodels
 openpyxl
