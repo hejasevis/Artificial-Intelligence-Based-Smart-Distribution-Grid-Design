@@ -12,3 +12,4 @@ plotly
 scikit-learn
 prophet
 openpyxl
+scipy
