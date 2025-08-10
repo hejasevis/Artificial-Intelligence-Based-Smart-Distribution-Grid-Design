@@ -738,7 +738,7 @@ elif selected == "Arıza/Anomali":
 
     st.divider()
 
-    # ---- Anomali listesi (ilk yaptığımız format, EXPANDER içinde) ----
+    # ---- Anomali listesi  ----
     with st.expander("📜 Anomali Listesi"):
         if anom > 0:
             for _, r in outl.sort_values("ds").iterrows():
@@ -749,31 +749,21 @@ elif selected == "Arıza/Anomali":
         else:
             st.info("Anomali bulunamadı.")
 
-    # ---- (Opsiyonel) tablo + indir butonu faydalı olduğu için dursun ----
-    anomalies = outl[["ds","y","score","diff1","pct1","tip"]].sort_values("ds")
-    with st.expander("📋 Anomali Tablosu"):
-        st.dataframe(anomalies, use_container_width=True)
-        st.download_button(
-            "📥 Anomalileri CSV indir",
-            data=anomalies.to_csv(index=False).encode("utf-8"),
-            file_name="anomalies.csv",
-            mime="text/csv"
-        )
 
-    # ---- Parametreler: ilk ekrandaki kontroller gibi ama SABİT/DEVRE DIŞI, EXPANDER içinde ----
-    with st.expander("⚙️ Kullanılan Parametreler (Sabit)"):
+    # ---- Parametreler ----
+    with st.expander("⚙️ Parametreler"):
         cpa, cpb, cpc, cpd = st.columns(4)
         with cpa:
-            st.selectbox("Zaman toplaması", ["Günlük Ortalama"], index=0, disabled=True)
+            AGG_MODE = st.selectbox("Zaman toplaması", ["Günlük Ortalama"], index=0)
         with cpb:
-            st.number_input("Test penceresi (gün)", min_value=1, max_value=365,
-                            value=HOLDOUT, step=1, disabled=True)
+            HOLDOUT = st.number_input("Test penceresi (gün)", min_value=1, max_value=365,
+                                      value=HOLDOUT, step=1)
         with cpc:
-            st.number_input("Anomali oranı (contamination)", min_value=0.0, max_value=1.0,
-                            value=float(CONTAM), step=0.01, format="%.2f", disabled=True)
+            CONTAM = st.number_input("Anomali oranı (contamination)", min_value=0.0, max_value=1.0,
+                                     value=float(CONTAM), step=0.01, format="%.2f")
         with cpd:
-            st.number_input("Rolling pencere (gün)", min_value=1, max_value=365,
-                            value=ROLL_WIN, step=1, disabled=True)
+            ROLL_WIN = st.number_input("Rolling pencere (gün)", min_value=1, max_value=365,
+                                       value=ROLL_WIN, step=1)
 
         st.caption("Kullanılan özellikler")
         st.code(", ".join(feats), language="text")
