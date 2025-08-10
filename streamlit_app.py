@@ -492,30 +492,34 @@ elif selected == "Gerilim Düşümü":
 
     st.divider()
 
-        # ================== Trafo bazlı basit karşılaştırma ==================
+    # ================== Trafo bazlı basit karşılaştırma (5–15 direk, %15 clip) ==================
     st.markdown("### 🔌 Trafo Seçin")
 
-    # 1) Trafo seçimi (tek seçim)
     trafo_names = trafo_df["Montaj Yeri"].dropna().astype(str).unique().tolist()
     if len(trafo_names) == 0:
         st.info("Trafo verisi yok."); st.stop()
 
-    trafo_sel = st.selectbox("Trafo Seçin", options=trafo_names)
+    trafo_sel = st.selectbox("Trafo", options=trafo_names)
 
-    # 2) Seçilen trafo konumu
+    # Seçilen trafo konumu
     trow = trafo_df[trafo_df["Montaj Yeri"].astype(str) == trafo_sel].iloc[0]
     t_coord = (float(trow["Enlem"]), float(trow["Boylam"]))
 
-    # 3) Direk verisi (tüm direkler → seçili trafoya mesafe)
+    # Direk verisi → bu trafoya en yakın direkleri seç
     dloc = direk_df.dropna(subset=["Enlem", "Boylam"]).copy()
     if len(dloc) == 0:
         st.error("Direk verisi yok."); st.stop()
 
+    # Mesafe (m)
     dloc["Mesafe (m)"] = dloc.apply(
         lambda r: geodesic((float(r["Enlem"]), float(r["Boylam"])), t_coord).meters, axis=1
     )
 
-    # 4) Yük (kW) — yoksa sentetik
+    # Bu trafo için analiz edilecek direk sayısı (5–15)
+    max_n = st.slider("Bu trafo için kaç direk analiz edilsin?", 5, 15, 12, 1)
+    dloc = dloc.sort_values("Mesafe (m)").head(int(max_n)).reset_index(drop=True)
+
+    # Yük (kW) — yoksa sentetik
     rng = np.random.default_rng(42)
     if "Yük (kW)" in dloc.columns:
         dloc["Yük (kW)"] = pd.to_numeric(dloc["Yük (kW)"], errors="coerce").fillna(
@@ -524,7 +528,7 @@ elif selected == "Gerilim Düşümü":
     else:
         dloc["Yük (kW)"] = rng.integers(10, 300, size=len(dloc))
 
-    # 5) Gerçek (formül) ve AI tahmini
+    # Gerçek (formül) ve AI tahmini
     dloc["Gerçek (%)"] = dloc.apply(lambda r: vdrop_kLN(r["Mesafe (m)"], r["Yük (kW)"], k_in), axis=1)
     if reg is not None:
         Xb = dloc[["Mesafe (m)", "Yük (kW)"]].copy()
@@ -533,7 +537,11 @@ elif selected == "Gerilim Düşümü":
     else:
         dloc["Tahmin (%)"] = np.nan
 
-    # 6) Basit performans metrikleri
+    # Maksimum %15'e clip (genel veri seti görünümü için)
+    dloc["Gerçek (%)"] = dloc["Gerçek (%)"].clip(upper=15)
+    dloc["Tahmin (%)"] = dloc["Tahmin (%)"].clip(upper=15)
+
+    # Performans metrikleri (clip sonrası)
     valid = dloc[["Gerçek (%)", "Tahmin (%)"]].dropna()
     if len(valid) >= 5:
         from sklearn.metrics import r2_score, mean_squared_error
@@ -542,22 +550,29 @@ elif selected == "Gerilim Düşümü":
     else:
         r2 = mse = float("nan")
 
-    cA, cB = st.columns(2)
+    cA, cB, cC = st.columns(3)
     cA.metric("R²", f"{r2:.3f}" if np.isfinite(r2) else "—")
     cB.metric("MSE", f"{mse:.4f}" if np.isfinite(mse) else "—")
+    cC.metric("Direk sayısı", f"{len(dloc)}")
 
-    # 7) Çizgi grafik: Gerçek vs Tahmin (tek eksen, sade)
+    # X ekseni etiketi: Direk Kodu varsa onu kullan, yoksa index
+    if "Direk Kodu" in dloc.columns and dloc["Direk Kodu"].notna().any():
+        dloc["Etiket"] = dloc["Direk Kodu"].astype(str)
+    else:
+        dloc["Etiket"] = (dloc.index + 1).astype(str)  # 1..N
+
+    # Çizgi grafik: Gerçek vs Tahmin (tek eksen, sade)
     import plotly.express as px
-    n_points = st.slider("Grafikte gösterilecek veri sayısı", 50, min(1000, len(dloc)), min(220, len(dloc)), 10)
-    plot_df = dloc[["Gerçek (%)", "Tahmin (%)"]].reset_index(drop=True).head(int(n_points))
-    plot_df = plot_df.reset_index().rename(columns={"index": "Veri Noktası"})
-
+    plot_df = dloc[["Etiket", "Gerçek (%)", "Tahmin (%)"]].melt(
+        id_vars="Etiket", var_name="Değişken", value_name="Gerilim Düşümü (%)"
+    )
     fig_cmp = px.line(
-        plot_df.melt(id_vars="Veri Noktası", var_name="Değişken", value_name="Gerilim Düşümü (%)"),
-        x="Veri Noktası", y="Gerilim Düşümü (%)", color="Değişken",
-        markers=True, template="plotly_white", title="Gerilim Düşümü Karşılaştırması"
+        plot_df, x="Etiket", y="Gerilim Düşümü (%)", color="Değişken",
+        markers=True, template="plotly_white",
+        title=f"{trafo_sel} — Gerilim Düşümü (Formül vs AI)"
     )
     fig_cmp.add_hline(y=thr_pct, line_dash="dot", annotation_text=f"Eşik %{thr_pct:.2f}")
+    fig_cmp.update_layout(xaxis_title="Direk", yaxis_title="Gerilim Düşümü (%)")
     st.plotly_chart(fig_cmp, use_container_width=True)
 
     
