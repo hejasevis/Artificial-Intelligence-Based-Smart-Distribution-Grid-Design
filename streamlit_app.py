@@ -397,66 +397,113 @@ elif selected == "Gerilim Düşümü":
     else:
         dv_ai = float("nan")
 
-    # ------- Sonuç -------
+    # ------- Sonuç kartları (kısa ve net) -------
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Formül (k·L·N)", f"%{dv_formula:.2f}")
-    m2.metric("AI Tahmini", f"%{dv_ai:.2f}" if np.isfinite(dv_ai) else "—")
-    m3.metric("Eşik", f"%{thr_pct:.2f}")
-    durum = "Uygun" if (dv_ai if np.isfinite(dv_ai) else dv_formula) <= thr_pct else "Uygunsuz"
-    m4.metric("Durum", durum)
+    m1.metric("📐 Formül (k·L·N)", f"%{dv_formula:.2f}")
+    m2.metric("🤖 AI Tahmini", f"%{dv_ai:.2f}" if np.isfinite(dv_ai) else "—")
+    m3.metric("🎯 Eşik", f"%{thr_pct:.2f}")
+    durum_val = (dv_ai if np.isfinite(dv_ai) else dv_formula) <= thr_pct
+    m4.metric("Durum", "✅ Uygun" if durum_val else "❌ Uygunsuz")
 
     st.divider()
 
-    # ------- Öneri: eşik altına inmek için min ayar -------
-    st.markdown("#### 🔁 Eşik Altına İndirme Önerisi ")
+    # ====== A) Renkli durum kartı + Gauge ======
+    # Renkli kart
+    bg = "#0ea65d" if durum_val else "#ef4444"
+    txt = "Eşik altında — Tasarım uygun." if durum_val else "Eşik üstünde — İyileştirme gerek."
+    st.markdown(
+        f"""
+        <div style="background:{bg};padding:16px;border-radius:14px;color:white;font-weight:600;">
+            {txt}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
-    # Formül tabanlı hızlı alt sınırlar
-    L_need = (thr_pct / (k_in * N_in)) if k_in > 0 and N_in > 0 else np.inf
-    N_need = (thr_pct / (k_in * L_in)) if k_in > 0 and L_in > 0 else np.inf
+    # Gauge (Plotly)
+    import plotly.graph_objects as go
+    gauge_val = float(dv_ai if np.isfinite(dv_ai) else dv_formula)
+    gauge_max = max(thr_pct * 2.0, gauge_val * 1.2, 10)
+    fig_g = go.Figure(
+        go.Indicator(
+            mode="gauge+number+delta",
+            value=gauge_val,
+            number={"suffix": "%"},
+            delta={"reference": thr_pct, "increasing":{"color":"#ef4444"}, "decreasing":{"color":"#0ea65d"}},
+            gauge={
+                "axis":{"range":[0, gauge_max]},
+                "bar":{"color":"#636efa"},
+                "steps":[
+                    {"range":[0, thr_pct], "color":"#b7e4c7"},
+                    {"range":[thr_pct, gauge_max], "color":"#f8d7da"},
+                ],
+                "threshold":{"line":{"color":"#ef4444","width":4}, "thickness":0.9, "value":thr_pct},
+            },
+            title={"text":"Gerilim Düşümü — Gauge"}
+        )
+    )
+    st.plotly_chart(fig_g, use_container_width=True)
 
-    r1, r2 = st.columns(2)
-    r1.metric("Formüle göre gerekli L (≤)", f"{L_need:.0f} m" if np.isfinite(L_need) else "—")
-    r2.metric("Formüle göre gerekli N (≤)", f"{N_need:.0f} kW" if np.isfinite(N_need) else "—")
+    st.divider()
 
-    # AI tabanlı küçük iyileştirme (sessiz, debug YOK)
-    def suggest_ai(L0, N0, k0, thr, model, step_L=10, step_N=5, max_iter=800):
-        if model is None:
-            return L0, N0, vdrop_kLN(L0, N0, k0)
-        def pred(Lv, Nv):
-            return float(model.predict(pd.DataFrame([{"L_m": Lv, "P_kw": Nv, "k": k0}]))[0])
-        Lb, Nb = L0, N0
-        dvb = pred(Lb, Nb)
-        it = 0
-        while dvb > thr and it < max_iter:
-            tried = False
-            # önce L azalt
-            if Lb - step_L >= 10:
-                dv_try = pred(Lb - step_L, Nb)
-                if dv_try < dvb:
-                    Lb, dvb, tried = Lb - step_L, dv_try, True
-            # sonra N azalt
-            if dvb > thr and Nb - step_N >= 1:
-                dv_try = pred(Lb, Nb - step_N)
-                if dv_try < dvb:
-                    Nb, dvb, tried = Nb - step_N, dv_try, True
-            if not tried:
-                break
-            it += 1
-        return Lb, Nb, dvb
+    # ====== B) Trafo karşılaştırma (Formül vs AI) ======
+    st.markdown("### 🔌 Trafo Karşılaştırma — Formül vs AI")
+    st.caption("Referans konumuna (lat/lon) göre her trafoya mesafeyi L olarak alır; N ve k sabitiyle düşüm hesaplanır.")
 
-    L_ai, N_ai, dv_ai_sug = suggest_ai(L_in, N_in, k_in, thr_pct, reg)
+    cc1, cc2, cc3 = st.columns(3)
+    with cc1:
+        ref_lat = st.number_input("Referans Enlem (°)", value=float(trafo_clean["Enlem"].mean()))
+    with cc2:
+        ref_lon = st.number_input("Referans Boylam (°)", value=float(trafo_clean["Boylam"].mean()))
+    with cc3:
+        top_k = st.number_input("Kaç trafo gösterilsin (yakınlık)", 3, 30, 10, 1)
 
-    cS1, cS2, cS3 = st.columns(3)
-    cS1.metric("Önerilen L (AI)", f"{L_ai:.0f} m")
-    cS2.metric("Önerilen N (AI)", f"{N_ai:.0f} kW")
-    cS3.metric("Tahmini Düşüm (AI)", f"%{dv_ai_sug:.2f}")
+    # L: referans → trafo jeodezik mesafe (m)
+    def _dist_to_ref(row):
+        try:
+            return geodesic((ref_lat, ref_lon), (float(row["Enlem"]), float(row["Boylam"]))).meters
+        except Exception:
+            return np.nan
 
-    if dv_ai_sug <= thr_pct:
-        st.success("✅ Eşik altında çözüm bulundu.")
+    traf = trafo_clean.copy()
+    traf["L_m"] = traf.apply(_dist_to_ref, axis=1)
+    traf = traf.dropna(subset=["L_m"])
+    traf = traf.sort_values("L_m").head(int(top_k)).reset_index(drop=True)
+
+    # Formül ve AI düşümleri
+    traf["Formül_%"] = traf["L_m"].apply(lambda L: vdrop_kLN(L, N_in, k_in))
+    if reg is not None:
+        Xbatch = pd.DataFrame({"L_m": traf["L_m"], "P_kw": N_in, "k": k_in})
+        traf["AI_%"] = reg.predict(Xbatch)
     else:
-        st.warning("ℹ️ Eşik altına inmek için iletken/k veya besleme koşullarını değiştirmen gerekebilir.")
+        traf["AI_%"] = np.nan
 
-    # Not: Kesit grafikleri ve progress/debug çıktıları kaldırıldı.
+    # Kapasite uygunluğu (pf=0.8 varsayımı, istersen parametreleştir)
+    def _cap_ok(row):
+        try:
+            return (float(row["Gücü[kVA]"]) * 0.8) >= N_in
+        except Exception:
+            return False
+    traf["Kapasite Uygun"] = traf.apply(_cap_ok, axis=1)
+
+    # Tablo
+    st.dataframe(
+        traf[["Montaj Yeri","Gücü[kVA]","L_m","Formül_%","AI_%","Kapasite Uygun"]]
+        .rename(columns={"L_m":"L (m)","Formül_%":"Gerilim Düşümü (Formül, %)","AI_%":"Gerilim Düşümü (AI, %)"})
+        .style.format({"L (m)":"{:.0f}","Gerilim Düşümü (Formül, %)":"{:.2f}","Gerilim Düşümü (AI, %)":"{:.2f}"}),
+        use_container_width=True
+    )
+
+    # Çubuk grafik (yan yana karşılaştırma)
+    plot_df = traf[["Montaj Yeri","Formül_%","AI_%"]].melt(id_vars="Montaj Yeri",
+                    var_name="Yöntem", value_name="Düşüm (%)")
+    fig_bar = px.bar(plot_df, x="Montaj Yeri", y="Düşüm (%)", color="Yöntem",
+                     barmode="group", template="plotly_white",
+                     title=f"Trafolara Göre Gerilim Düşümü — N={N_in} kW, k={k_in}")
+    fig_bar.add_hline(y=thr_pct, line_dash="dot", annotation_text=f"Eşik %{thr_pct:.2f}")
+    fig_bar.update_layout(xaxis_tickangle=20)
+    st.plotly_chart(fig_bar, use_container_width=True)
+
 
 
 # ===================== SAYFA 3: Forecasting =====================
