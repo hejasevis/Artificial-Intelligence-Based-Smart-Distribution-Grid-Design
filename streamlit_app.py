@@ -731,19 +731,27 @@ elif selected == "Arıza/Anomali":
     total = int(len(ts_feats))
     anom  = int(outl.shape[0])
     rate  = (anom / total * 100.0) if total > 0 else 0.0
+
+    st.markdown("### 📊 Anomali İstatistikleri")
+    st.write("")  # biraz boşluk
+
     c1, c2, c3 = st.columns(3)
-    c1.metric("Toplam Kayıt", f"{total}")
-    c2.metric("Anomali Sayısı", f"{anom}")
-    c3.metric("Anomali Oranı", f"%{rate:.2f}")
+
+    with c1:
+        st.metric(label="📄 Toplam Kayıt", value=f"{total:,}")
+    with c2:
+        st.metric(label="🚨 Anomali Sayısı", value=f"{anom:,}")
+    with c3:
+        st.metric(label="📈 Anomali Oranı", value=f"%{rate:.2f}")
 
     st.divider()
 
-    # ---- (Opsiyonel) tablo + indir butonu faydalı olduğu için dursun ----
+
+    # ---- (Opsiyonel)  ----
     anomalies = outl[["ds","y","score","diff1","pct1","tip"]].sort_values("ds")
     with st.expander("📋 Anomali Tablosu"):
         st.dataframe(anomalies, use_container_width=True)
       
-
 
     # ---- Parametreler ----
     with st.expander("⚙️ Parametreler"):
