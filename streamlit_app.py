@@ -323,67 +323,71 @@ if selected == "Talep Girdisi":
     st.subheader("📡 Oluşturulan Şebeke Hattı")
     st_folium(m2, height=620, width="100%", key="result_map_basic")
 
-# ===================== SAYFA 2: Gerilim Düşümü =====================
+# ===================== SAYFA 2: Gerilim Düşümü — Gerçek Veri & AI =====================
 elif selected == "Gerilim Düşümü":
-    st.subheader("📉 Gerilim Düşümü — Gerçek Veri & AI (Trafo Bazlı)")
+    st.subheader("📉 Gerilim Düşümü ")
 
-    # ===== Girdiler =====
+    # ------- Girdiler (sayfa içi) -------
     c0, c1, c2, c3 = st.columns([1,1,1,1])
     with c0:
-        k_const = st.number_input("k sabiti", 0.0, 1.0, 0.0001, 0.0001)
+        k_const = st.number_input("k sabiti", 0.0, 1.0, 0.0001, 0.0001, key="gd_k_inline")
     with c1:
-        thr_pct = st.number_input("Eşik (%)", 0.5, 20.0, 5.0, 0.5)
+        thr_pct = st.number_input("Eşik (%)", 0.5, 20.0, 5.0, 0.5, key="gd_thr_inline")
     with c2:
         L_in = st.number_input("Hat Uzunluğu L (m)", 10, 10000, 600, 10)
     with c3:
         N_in = st.number_input("Yük N (kW)", 1, 5000, 200, 1)
 
-    k_in = k_const
+    k_in = k_const  # aynı k'yı hem örnek hesapta hem AI tahminde kullanacağız
 
-    # ===== Formül Hesap Fonksiyonu =====
-    def vdrop_kLN(L_m, P_kw, k):
+    # ------- Formül -------
+    def vdrop_kLN(L_m: float, P_kw: float, k: float) -> float:
         try:
             return float(k) * float(L_m) * float(P_kw)
-        except:
+        except Exception:
             return float("nan")
 
-    # ===== Eğitim Verisi =====
+    # ------- Eğitim verisi: ext_df varsa kullan, yoksa sentetik (tamamı %15 ile sınırlandırılır) -------
     def build_training_df(ext_df):
-        if ext_df is not None and not ext_df.empty:
+        try:
             cols_lower = {c.lower(): c for c in ext_df.columns}
-            needs = ["l_m", "p_kw", "k", "dv_pct"]
-            if all(n in cols_lower for n in needs):
-                df = pd.DataFrame({
-                    "L_m":    ext_df[cols_lower["l_m"]],
-                    "P_kw":   ext_df[cols_lower["p_kw"]],
-                    "k":      ext_df[cols_lower["k"]],
-                    "dv_pct": ext_df[cols_lower["dv_pct"]],
-                }).dropna()
-                df["dv_pct"] = df["dv_pct"].clip(0, 15)
-                return df
+        except Exception:
+            cols_lower = {}
+        needs = ["l_m", "p_kw", "k", "dv_pct"]
+        if ext_df is not None and len(ext_df) > 0 and all(n in cols_lower for n in needs):
+            df = pd.DataFrame({
+                "L_m":    ext_df[cols_lower["l_m"]],
+                "P_kw":   ext_df[cols_lower["p_kw"]],
+                "k":      ext_df[cols_lower["k"]],
+                "dv_pct": ext_df[cols_lower["dv_pct"]],
+            }).dropna()
+            df["dv_pct"] = df["dv_pct"].clip(0, 15)  # max %15
+            return df
 
-        # fallback sentetik
+        # fallback: sentetik (ölçekler daraltıldı, üst sınır %15)
         rng = np.random.default_rng(0)
         n = 3000
         L = rng.uniform(10, 3000, n)
-        P = rng.uniform(1, 600, n)
-        k_vals = np.clip(rng.normal(loc=k_const if k_const > 0 else 1e-4,
-                                    scale=0.25 * (k_const if k_const > 0 else 1e-4),
-                                    size=n), 1e-6, 1.0)
-        dv = np.clip(k_vals * L * P * rng.normal(1.0, 0.03, size=n), 0, 15)
+        P = rng.uniform(1,  600,  n)
+        k_vals = rng.normal(loc=k_const if k_const > 0 else 1e-4,
+                            scale=0.25 * (k_const if k_const > 0 else 1e-4),
+                            size=n)
+        k_vals = np.clip(k_vals, 1e-6, 1.0)
+        dv = k_vals * L * P * rng.normal(1.0, 0.03, size=n)  # küçük ölçüm hatası
+        dv = np.clip(dv, 0, 15)  # max %15
         return pd.DataFrame({"L_m": L, "P_kw": P, "k": k_vals, "dv_pct": dv})
 
     train_df = build_training_df(ext_df)
 
-    # ===== Model Eğitimi =====
+    # ------- Model eğitimi (LightGBM yoksa RF'ye düş) -------
     @st.cache_resource
-    def train_regressor(df):
+    def train_regressor(df: pd.DataFrame):
         X = df[["L_m", "P_kw", "k"]]
         y = df["dv_pct"]
         try:
             from lightgbm import LGBMRegressor
             reg = LGBMRegressor(n_estimators=400, learning_rate=0.05, num_leaves=64, random_state=42)
-        except:
+        except Exception:
             from sklearn.ensemble import RandomForestRegressor
             reg = RandomForestRegressor(n_estimators=350, random_state=42, n_jobs=-1)
         reg.fit(X, y)
@@ -391,45 +395,10 @@ elif selected == "Gerilim Düşümü":
 
     try:
         reg = train_regressor(train_df)
-    except:
+    except Exception:
         reg = None
 
-    # ===== Tek Trafo Seçimi =====
-    if 'trafo_df' in locals():
-        trafo_names = trafo_df["Montaj Yeri"].dropna().unique()
-        trafo_sec = st.selectbox("🔌 Trafo Seçin", options=trafo_names)
-        trafo_row = trafo_df[trafo_df["Montaj Yeri"] == trafo_sec].iloc[0]
-        trafo_power = trafo_row.get("Gücü[kVA]", 100)
-
-        # 5 direk varsayımı
-        direk_sayisi = 5
-        L_list = np.linspace(L_in, L_in + 500, direk_sayisi)
-        N_list = np.linspace(N_in, N_in + 50, direk_sayisi)
-
-        dloc = pd.DataFrame({
-            "L_m": L_list,
-            "P_kw": N_list,
-            "k": [k_in] * direk_sayisi
-        })
-
-        # Formül
-        dloc["Formül (%)"] = dloc.apply(lambda r: vdrop_kLN(r["L_m"], r["P_kw"], r["k"]), axis=1)
-
-        # AI Tahmini
-        if reg is not None:
-            dloc_pred = dloc[["L_m", "P_kw", "k"]]  # Model ile uyumlu kolonlar
-            dloc["Tahmin (%)"] = reg.predict(dloc_pred)
-        else:
-            dloc["Tahmin (%)"] = float("nan")
-
-        # Gösterim
-        st.dataframe(dloc)
-
-        fig = px.line(dloc, x="L_m", y=["Formül (%)", "Tahmin (%)"], markers=True,
-                      title=f"Gerilim Düşümü — {trafo_sec}")
-        st.plotly_chart(fig, use_container_width=True)
-
-    # ===== Örnek Kullanıcı Hesabı =====
+    # ------- Örnek tahmin -------
     dv_formula = vdrop_kLN(L_in, N_in, k_in)
     if reg is not None:
         Xq = pd.DataFrame([{"L_m": L_in, "P_kw": N_in, "k": k_in}])
@@ -437,12 +406,111 @@ elif selected == "Gerilim Düşümü":
     else:
         dv_ai = float("nan")
 
+    # tekil çıktıları da 15'e kırp
+    if np.isfinite(dv_formula):
+        dv_formula = float(np.clip(dv_formula, 0, 15))
+    if np.isfinite(dv_ai):
+        dv_ai = float(np.clip(dv_ai, 0, 15))
+
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("📐 Formül (k·L·N)", f"%{dv_formula:.2f}")
     m2.metric("🤖 AI Tahmini", f"%{dv_ai:.2f}" if np.isfinite(dv_ai) else "—")
     m3.metric("🎯 Eşik", f"%{thr_pct:.2f}")
     durum_val = (dv_ai if np.isfinite(dv_ai) else dv_formula) <= thr_pct
     m4.metric("Durum", "✅ Uygun" if durum_val else "❌ Uygunsuz")
+
+    st.divider()
+
+    # ================== Trafo bazlı basit karşılaştırma (FİX 5 DİREK, %15 clip) ==================
+    st.markdown("### 🔌 Trafo Seçin")
+
+    trafo_names = trafo_df["Montaj Yeri"].dropna().astype(str).unique().tolist()
+    if len(trafo_names) == 0:
+        st.info("Trafo verisi yok."); st.stop()
+
+    trafo_sel = st.selectbox("Trafo Seçin", options=trafo_names)
+
+    # 1) Seçilen trafo konumu
+    trow = trafo_df[trafo_df["Montaj Yeri"].astype(str) == trafo_sel].iloc[0]
+    t_coord = (float(trow["Enlem"]), float(trow["Boylam"]))
+
+    # 2) Direkler: en yakın 5 direk (fix)
+    dloc = direk_df.dropna(subset=["Enlem", "Boylam"]).copy()
+    if len(dloc) == 0:
+        st.error("Direk verisi yok."); st.stop()
+
+    dloc["Mesafe (m)"] = dloc.apply(
+        lambda r: geodesic((float(r["Enlem"]), float(r["Boylam"])), t_coord).meters, axis=1
+    )
+    dloc = dloc.sort_values("Mesafe (m)").head(5).reset_index(drop=True)  # <<< FİX 5 DİREK
+
+    # 3) Yük (kW): yoksa sentetik, var ise sayısallaştır
+    rng = np.random.default_rng(42)
+    if "Yük (kW)" in dloc.columns:
+        dloc["Yük (kW)"] = pd.to_numeric(dloc["Yük (kW)"], errors="coerce").fillna(
+            rng.integers(10, 300, size=len(dloc))
+        )
+    else:
+        dloc["Yük (kW)"] = rng.integers(10, 300, size=len(dloc))
+
+    # 4) Gerçek (formül) ve AI tahmini
+    dloc["Gerçek (%)"] = dloc.apply(lambda r: vdrop_kLN(r["Mesafe (m)"], r["Yük (kW)"], k_in), axis=1)
+    if reg is not None:
+    Xb = dloc.rename(columns={"Mesafe (m)": "L_m", "Yük (kW)": "P_kw"})[["L_m", "P_kw"]].copy()
+    Xb["k"] = k_in
+    dloc["Tahmin (%)"] = reg.predict(Xb)
+    else:
+    dloc["Tahmin (%)"] = np.nan
+
+
+    # 5) ÜST SINIR: max %15’e clip
+    dloc["Gerçek (%)"]  = dloc["Gerçek (%)"].clip(upper=15)
+    dloc["Tahmin (%)"]  = dloc["Tahmin (%)"].clip(upper=15)
+
+    # 6) Basit performans
+    valid = dloc[["Gerçek (%)", "Tahmin (%)"]].dropna()
+    if len(valid) >= 3:
+        from sklearn.metrics import r2_score, mean_squared_error
+        r2  = r2_score(valid["Gerçek (%)"], valid["Tahmin (%)"])
+        mse = mean_squared_error(valid["Gerçek (%)"], valid["Tahmin (%)"])
+    else:
+        r2 = mse = float("nan")
+
+    # 7) Grafik: Çizgi grafiği (Direk Kodu bazlı)
+    import plotly.express as px
+    x_labels = dloc["Direk Kodu"].astype(str).fillna("—")
+    plot_df = dloc.assign(**{"Direk": x_labels})[["Direk", "Gerçek (%)", "Tahmin (%)"]]
+
+    fig_cmp = px.line(
+        plot_df,
+        x="Direk",
+        y=["Gerçek (%)", "Tahmin (%)"],
+        markers=True,
+        template="plotly_white",
+        title=f"{trafo_sel} — Gerçek vs AI"
+    )
+    fig_cmp.add_hline(y=thr_pct, line_dash="dot", annotation_text=f"Eşik %{thr_pct:.2f}")
+    fig_cmp.update_layout(
+        xaxis_title="Direk",
+        yaxis_title="Gerilim Düşümü (%)"
+    )
+    st.plotly_chart(fig_cmp, use_container_width=True)
+
+    # 8) Expander içinde R², MSE ve tablo
+    with st.expander("📊 Detaylı Sonuçlar"):
+        st.markdown(f"**R²:** {r2:.3f}" if np.isfinite(r2) else "**R²:** —")
+        st.markdown(f"**MSE:** {mse:.4f}" if np.isfinite(mse) else "**MSE:** —")
+        st.dataframe(
+            dloc[["Direk Kodu","Mesafe (m)","Yük (kW)","Gerçek (%)","Tahmin (%)"]]
+            .style.format({
+                "Mesafe (m)":"{:.0f}",
+                "Yük (kW)":"{:.0f}",
+                "Gerçek (%)":"{:.2f}",
+                "Tahmin (%)":"{:.2f}"
+            }),
+            use_container_width=True
+        )
+
 
 
 # ===================== SAYFA 3: Forecasting (Sadece Prophet) =====================
