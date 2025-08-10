@@ -742,12 +742,7 @@ elif selected == "Arıza/Anomali":
     anomalies = outl[["ds","y","score","diff1","pct1","tip"]].sort_values("ds")
     with st.expander("📋 Anomali Tablosu"):
         st.dataframe(anomalies, use_container_width=True)
-        st.download_button(
-            "📥 Anomalileri CSV indir",
-            data=anomalies.to_csv(index=False).encode("utf-8"),
-            file_name="anomalies.csv",
-            mime="text/csv"
-        )
+      
 
 
     # ---- Parametreler ----
