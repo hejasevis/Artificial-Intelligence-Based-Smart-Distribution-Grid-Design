@@ -420,89 +420,75 @@ elif selected == "Gerilim Düşümü":
         unsafe_allow_html=True
     )
 
-    # Gauge (Plotly)
-    import plotly.graph_objects as go
-    gauge_val = float(dv_ai if np.isfinite(dv_ai) else dv_formula)
-    gauge_max = max(thr_pct * 2.0, gauge_val * 1.2, 10)
-    fig_g = go.Figure(
-        go.Indicator(
-            mode="gauge+number+delta",
-            value=gauge_val,
-            number={"suffix": "%"},
-            delta={"reference": thr_pct, "increasing":{"color":"#ef4444"}, "decreasing":{"color":"#0ea65d"}},
-            gauge={
-                "axis":{"range":[0, gauge_max]},
-                "bar":{"color":"#636efa"},
-                "steps":[
-                    {"range":[0, thr_pct], "color":"#b7e4c7"},
-                    {"range":[thr_pct, gauge_max], "color":"#f8d7da"},
-                ],
-                "threshold":{"line":{"color":"#ef4444","width":4}, "thickness":0.9, "value":thr_pct},
-            },
-            title={"text":"Gerilim Düşümü — Gauge"}
-        )
-    )
-    st.plotly_chart(fig_g, use_container_width=True)
-
+    # ================== TRAFO KARŞILAŞTIRMA (Sidebar seçmeli) ==================
     st.divider()
-
-    # ====== B) Trafo karşılaştırma (Formül vs AI) ======
     st.markdown("### 🔌 Trafo Karşılaştırma — Formül vs AI")
-    st.caption("Referans konumuna (lat/lon) göre her trafoya mesafeyi L olarak alır; N ve k sabitiyle düşüm hesaplanır.")
 
-    cc1, cc2, cc3 = st.columns(3)
-    with cc1:
-        ref_lat = st.number_input("Referans Enlem (°)", value=float(trafo_clean["Enlem"].mean()))
-    with cc2:
-        ref_lon = st.number_input("Referans Boylam (°)", value=float(trafo_clean["Boylam"].mean()))
-    with cc3:
-        top_k = st.number_input("Kaç trafo gösterilsin (yakınlık)", 3, 30, 10, 1)
+    # --- Sidebar: trafo seçimi ve referans nokta ---
+    st.sidebar.header("Trafo Karşılaştırma")
+    trafo_names = trafo_clean["Montaj Yeri"].dropna().astype(str).unique().tolist()
+    sel_trafos = st.sidebar.multiselect("Trafo seç", options=trafo_names, default=trafo_names[:5])
+    ref_lat = st.sidebar.number_input("Referans Enlem (°)", value=float(trafo_clean["Enlem"].mean()))
+    ref_lon = st.sidebar.number_input("Referans Boylam (°)", value=float(trafo_clean["Boylam"].mean()))
+    sort_by = st.sidebar.selectbox("Sırala", ["Farka göre (büyük→küçük)", "AI düşüme göre (küçük→büyük)", "Formül düşüme göre (küçük→büyük)"])
 
-    # L: referans → trafo jeodezik mesafe (m)
-    def _dist_to_ref(row):
-        try:
-            return geodesic((ref_lat, ref_lon), (float(row["Enlem"]), float(row["Boylam"]))).meters
-        except Exception:
-            return np.nan
-
-    traf = trafo_clean.copy()
-    traf["L_m"] = traf.apply(_dist_to_ref, axis=1)
-    traf = traf.dropna(subset=["L_m"])
-    traf = traf.sort_values("L_m").head(int(top_k)).reset_index(drop=True)
-
-    # Formül ve AI düşümleri
-    traf["Formül_%"] = traf["L_m"].apply(lambda L: vdrop_kLN(L, N_in, k_in))
-    if reg is not None:
-        Xbatch = pd.DataFrame({"L_m": traf["L_m"], "P_kw": N_in, "k": k_in})
-        traf["AI_%"] = reg.predict(Xbatch)
+    if len(sel_trafos) == 0:
+        st.info("Sidebardan en az bir trafo seç.")
     else:
-        traf["AI_%"] = np.nan
+        # Seçilen trafoları al
+        traf = trafo_clean[trafo_clean["Montaj Yeri"].astype(str).isin(sel_trafos)].copy()
 
-    # Kapasite uygunluğu (pf=0.8 varsayımı, istersen parametreleştir)
-    def _cap_ok(row):
-        try:
-            return (float(row["Gücü[kVA]"]) * 0.8) >= N_in
-        except Exception:
-            return False
-    traf["Kapasite Uygun"] = traf.apply(_cap_ok, axis=1)
+        # L: referans → trafo jeodezik mesafe (m)
+        def _dist_to_ref(row):
+            try:
+                return geodesic((ref_lat, ref_lon), (float(row["Enlem"]), float(row["Boylam"]))).meters
+            except Exception:
+                return np.nan
 
-    # Tablo
-    st.dataframe(
-        traf[["Montaj Yeri","Gücü[kVA]","L_m","Formül_%","AI_%","Kapasite Uygun"]]
-        .rename(columns={"L_m":"L (m)","Formül_%":"Gerilim Düşümü (Formül, %)","AI_%":"Gerilim Düşümü (AI, %)"})
-        .style.format({"L (m)":"{:.0f}","Gerilim Düşümü (Formül, %)":"{:.2f}","Gerilim Düşümü (AI, %)":"{:.2f}"}),
-        use_container_width=True
-    )
+        traf["L_m"] = traf.apply(_dist_to_ref, axis=1)
+        traf = traf.dropna(subset=["L_m"]).reset_index(drop=True)
 
-    # Çubuk grafik (yan yana karşılaştırma)
-    plot_df = traf[["Montaj Yeri","Formül_%","AI_%"]].melt(id_vars="Montaj Yeri",
-                    var_name="Yöntem", value_name="Düşüm (%)")
-    fig_bar = px.bar(plot_df, x="Montaj Yeri", y="Düşüm (%)", color="Yöntem",
-                     barmode="group", template="plotly_white",
-                     title=f"Trafolara Göre Gerilim Düşümü — N={N_in} kW, k={k_in}")
-    fig_bar.add_hline(y=thr_pct, line_dash="dot", annotation_text=f"Eşik %{thr_pct:.2f}")
-    fig_bar.update_layout(xaxis_tickangle=20)
-    st.plotly_chart(fig_bar, use_container_width=True)
+        # Hesaplar (N=kW ve k sabiti olarak sayfanın üstteki L/N/k girişlerindeki N_in ve k_in kullanıyoruz)
+        traf["Formül_%"] = traf["L_m"].apply(lambda L: vdrop_kLN(L, N_in, k_in))
+        if reg is not None:
+            Xbatch = pd.DataFrame({"L_m": traf["L_m"], "P_kw": N_in, "k": k_in})
+            traf["AI_%"] = reg.predict(Xbatch)
+        else:
+            traf["AI_%"] = np.nan
+
+        traf["Fark_%"] = traf["AI_%"] - traf["Formül_%"]
+
+        # Sıralama
+        if sort_by.startswith("Farka"):
+            traf = traf.sort_values("Fark_%", ascending=False)
+        elif sort_by.startswith("AI"):
+            traf = traf.sort_values("AI_%", ascending=True)
+        else:
+            traf = traf.sort_values("Formül_%", ascending=True)
+
+        # Tablo
+        st.dataframe(
+            traf[["Montaj Yeri","Gücü[kVA]","L_m","Formül_%","AI_%","Fark_%"]]
+            .rename(columns={"L_m":"L (m)","Formül_%":"Gerilim Düşümü (Formül, %)","AI_%":"Gerilim Düşümü (AI, %)","Fark_%":"Fark (AI–Formül, %)"})
+            .style.format({"L (m)":"{:.0f}","Gerilim Düşümü (Formül, %)":"{:.2f}","Gerilim Düşümü (AI, %)":"{:.2f}","Fark (AI–Formül, %)":"{:+.2f}"}),
+            use_container_width=True
+        )
+
+        # Bar grafik: AI vs Formül (yan yana)
+        plot_df = traf[["Montaj Yeri","Formül_%","AI_%"]].melt(id_vars="Montaj Yeri",
+                        var_name="Yöntem", value_name="Düşüm (%)")
+        fig_bar = px.bar(plot_df, x="Montaj Yeri", y="Düşüm (%)", color="Yöntem",
+                         barmode="group", template="plotly_white",
+                         title=f"Seçilen Trafolar için Gerilim Düşümü — N={N_in} kW, k={k_in}")
+        fig_bar.add_hline(y=thr_pct, line_dash="dot", annotation_text=f"Eşik %{thr_pct:.2f}")
+        fig_bar.update_layout(xaxis_tickangle=20)
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+        # Fark grafiği
+        fig_diff = px.bar(traf, x="Montaj Yeri", y="Fark_%", template="plotly_white",
+                          title="AI – Formül Farkı (%, + pozitif = AI daha yüksek)")
+        fig_diff.add_hline(y=0, line_dash="dot")
+        st.plotly_chart(fig_diff, use_container_width=True)
 
 
 
