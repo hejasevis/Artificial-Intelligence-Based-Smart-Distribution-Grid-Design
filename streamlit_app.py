@@ -413,7 +413,7 @@ elif selected == "Gerilim Düşümü":
         dv_ai = float(np.clip(dv_ai, 0, 15))
 
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("📐 Formül (k·L·N)", f"%{dv_formula:.2f}")
+    m1.metric("📐 Hesaplama", f"%{dv_formula:.2f}")
     m2.metric("🤖 AI Tahmini", f"%{dv_ai:.2f}" if np.isfinite(dv_ai) else "—")
     m3.metric("🎯 Eşik", f"%{thr_pct:.2f}")
     durum_val = (dv_ai if np.isfinite(dv_ai) else dv_formula) <= thr_pct
@@ -514,7 +514,7 @@ elif selected == "Gerilim Düşümü":
 
 # ===================== SAYFA 3: Forecasting (Sadece Prophet) =====================
 elif selected == "Forecasting":
-    st.subheader("📈 Yük Tahmini (Forecasting) — Prophet")
+    st.subheader("📈 Zaman Serisi Tahmini ")
 
     c1, c2, c3 = st.columns([1,1,1])
     with c1:
@@ -522,7 +522,7 @@ elif selected == "Forecasting":
     with c2:
         holdout_days = st.number_input("Test penceresi (gün)", 7, 90, 30, 1)
     with c3:
-        agg = st.selectbox("Zaman toplaması", ["Günlük Ortalama", "Günlük Toplam"], index=0)
+        agg = st.selectbox("Zaman Ölçeği", ["Günlük Ortalama", "Günlük Toplam"], index=0)
 
     if ext_df is None or ext_df.empty:
         st.error("smart_grid_dataset.csv bulunamadı/boş."); st.stop()
@@ -592,9 +592,6 @@ elif selected == "Forecasting":
     out = fc[["ds","yhat","yhat_low","yhat_high"]].rename(
         columns={"ds":"tarih","yhat":"tahmin_kw","yhat_low":"alt","yhat_high":"üst"}
     )
-    st.download_button("📥 Tahmini CSV indir",
-                       data=out.to_csv(index=False).encode("utf-8"),
-                       file_name="forecast_prophet.csv", mime="text/csv")
 
     st.divider()
 
@@ -630,7 +627,7 @@ elif selected == "Forecasting":
 
 # ===================== SAYFA 4: Arıza / Anomali Tespiti (sabit parametreler + şık metrikler) =====================
 elif selected == "Arıza/Anomali":
-    st.subheader("🚨 Arıza & Anomali Tespiti — IsolationForest")
+    st.subheader("🚨 Arıza & Anomali Tespiti")
 
     # ---- Sabitler (kullanıcıdan sormuyoruz) ----
     AGG_MODE = "mean"     # Günlük Ortalama
@@ -668,7 +665,7 @@ elif selected == "Arıza/Anomali":
     ts = s.reset_index().rename(columns={"index":"ds"})
 
     if len(ts) <= HOLDOUT + 30:
-        st.error("Zaman serisi kısa. HOLDOUT’u küçültmek veya veri aralığını artırmak gerekli olabilir."); st.stop()
+        st.error("Zaman serisi kısa. Test veri aralığını küçültmek veya veri aralığını artırmak gerekli olabilir."); st.stop()
 
     # ---- Özellikler ----
     ts["lag1"] = ts["y"].shift(1)
@@ -687,7 +684,7 @@ elif selected == "Arıza/Anomali":
     train = ts_feats[ts_feats["ds"] <= cutoff].copy()
     test  = ts_feats[ts_feats["ds"] >  cutoff].copy()
     if len(train) < 20 or len(test) < 5:
-        st.error("Eğitim/test için yeterli veri yok. Parametreleri (HOLDOUT/ROLL_WIN) yeniden değerlendir."); st.stop()
+        st.error("Eğitim/test için yeterli veri yok. Parametreleri yeniden değerlendir."); st.stop()
 
     # ---- Model ----
     from sklearn.ensemble import IsolationForest
@@ -757,13 +754,13 @@ elif selected == "Arıza/Anomali":
     with st.expander("⚙️ Parametreler"):
         cpa, cpb, cpc, cpd = st.columns(4)
         with cpa:
-            AGG_MODE = st.selectbox("Zaman toplaması", ["Günlük Ortalama"], index=0)
+            AGG_MODE = st.selectbox("Zaman Ölçeği", ["Günlük Ortalama"], index=0)
         with cpb:
-            HOLDOUT = st.number_input("Test penceresi (gün)", min_value=1, max_value=365,
+            HOLDOUT = st.number_input("Test Veri Aralığı (Gün)", min_value=1, max_value=365,
                                       value=HOLDOUT, step=1)
         with cpc:
-            CONTAM = st.number_input("Anomali oranı (contamination)", min_value=0.0, max_value=1.0,
+            CONTAM = st.number_input("Anomali Oranı", min_value=0.0, max_value=1.0,
                                      value=float(CONTAM), step=0.01, format="%.2f")
         with cpd:
-            ROLL_WIN = st.number_input("Rolling pencere (gün)", min_value=1, max_value=365,
+            ROLL_WIN = st.number_input("Hareketli Ortalama Penceresi (Gün)", min_value=1, max_value=365,
                                        value=ROLL_WIN, step=1)
