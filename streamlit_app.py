@@ -582,101 +582,90 @@ elif selected == "Gerilim Düşümü":
     m4.metric("Durum", "✅ Uygun" if durum_val else "❌ Uygunsuz")
 
     st.divider()
-    
-    # ================== Trafo bazlı karşılaştırma (5–15 direk, %15 clip) ==================
-    st.markdown("### 🔌 Trafo")
 
-    # Trafo seçimi
-    trafo_names = trafo_df["Montaj Yeri"].dropna().astype(str).unique().tolist()
-    if len(trafo_names) == 0:
-        st.info("Trafo verisi yok."); st.stop()
-    trafo_sel = st.selectbox("Trafo Seçin", options=trafo_names)
+# ================== Trafo bazlı basit karşılaştırma (FİX 5 DİREK) ==================
+st.markdown("### 🔌 Trafo Seçin")
 
-    # Seçilen trafo konumu
-    trow = trafo_df[trafo_df["Montaj Yeri"].astype(str) == trafo_sel].iloc[0]
-    t_coord = (float(trow["Enlem"]), float(trow["Boylam"]))
+trafo_names = trafo_df["Montaj Yeri"].dropna().astype(str).unique().tolist()
+if len(trafo_names) == 0:
+    st.info("Trafo verisi yok."); st.stop()
 
-    # Direk verisi
-    dloc = direk_df.dropna(subset=["Enlem", "Boylam"]).copy()
-    if len(dloc) == 0:
-        st.error("Direk verisi yok."); st.stop()
+trafo_sel = st.selectbox("Trafo Seçin", options=trafo_names)
 
-    # Mesafe (m) — seçilen trafoya
-    dloc["Mesafe (m)"] = dloc.apply(
-        lambda r: geodesic((float(r["Enlem"]), float(r["Boylam"])), t_coord).meters, axis=1
+# 1) Seçilen trafo konumu
+trow = trafo_df[trafo_df["Montaj Yeri"].astype(str) == trafo_sel].iloc[0]
+t_coord = (float(trow["Enlem"]), float(trow["Boylam"]))
+
+# 2) Direkler: en yakın 5 direk (fix)
+dloc = direk_df.dropna(subset=["Enlem", "Boylam"]).copy()
+if len(dloc) == 0:
+    st.error("Direk verisi yok."); st.stop()
+
+dloc["Mesafe (m)"] = dloc.apply(
+    lambda r: geodesic((float(r["Enlem"]), float(r["Boylam"])), t_coord).meters, axis=1
+)
+dloc = dloc.sort_values("Mesafe (m)").head(5).reset_index(drop=True)  # <<< FİX 5 DİREK
+
+# 3) Yük (kW): yoksa sentetik, var ise sayısallaştır
+rng = np.random.default_rng(42)
+if "Yük (kW)" in dloc.columns:
+    dloc["Yük (kW)"] = pd.to_numeric(dloc["Yük (kW)"], errors="coerce").fillna(
+        rng.integers(10, 300, size=len(dloc))
     )
+else:
+    dloc["Yük (kW)"] = rng.integers(10, 300, size=len(dloc))
 
-    # Bu trafo için analiz edilecek direk sayısı (5–15)
-    max_n = st.slider("Bu trafo için kaç direk analiz edilsin?", 5, 15, 12, 1)
-    dloc = dloc.sort_values("Mesafe (m)").head(int(max_n)).reset_index(drop=True)
+# 4) Gerçek (formül) ve AI tahmini
+def vdrop_kLN(L_m, P_kw, k): 
+    return float(k) * float(L_m) * float(P_kw)
 
-    # Yük (kW) — yoksa sentetik üret
-    rng = np.random.default_rng(42)
-    if "Yük (kW)" in dloc.columns:
-        dloc["Yük (kW)"] = pd.to_numeric(dloc["Yük (kW)"], errors="coerce")
-    else:
-        dloc["Yük (kW)"] = np.nan
-    dloc["Yük (kW)"] = dloc["Yük (kW)"].fillna(rng.integers(10, 300, size=len(dloc)))
+dloc["Gerçek (%)"] = dloc.apply(lambda r: vdrop_kLN(r["Mesafe (m)"], r["Yük (kW)"], k_in), axis=1)
+if reg is not None:
+    Xb = dloc[["Mesafe (m)", "Yük (kW)"]].copy()
+    Xb["k"] = k_in
+    dloc["Tahmin (%)"] = reg.predict(Xb)
+else:
+    dloc["Tahmin (%)"] = np.nan
 
-    # --------- VEKTÖRİZE HESAPLAR ---------
-    # Gerçek (k·L·N)
-    L_vec = pd.to_numeric(dloc["Mesafe (m)"], errors="coerce")
-    N_vec = pd.to_numeric(dloc["Yük (kW)"],   errors="coerce")
-    dloc["Gerçek (%)"] = (k_in * L_vec * N_vec).astype(float)
+# 5) ÜST SINIR: max %15’e clip
+dloc["Gerçek (%)"]  = dloc["Gerçek (%)"].clip(upper=15)
+dloc["Tahmin (%)"]  = dloc["Tahmin (%)"].clip(upper=15)
 
-    # AI Tahmini
-    if reg is not None:
-        Xb = pd.DataFrame({
-            "L_m": L_vec,
-            "P_kw": N_vec,
-            "k":   float(k_in)
-        })
-        dloc["Tahmin (%)"] = pd.Series(reg.predict(Xb), index=dloc.index)
-    else:
-        dloc["Tahmin (%)"] = np.nan
-
-    # Sağlamlaştırma: [0, 15]% aralığına kırp
-    dloc["Gerçek (%)"]  = dloc["Gerçek (%)"].clip(lower=0, upper=15)
-    dloc["Tahmin (%)"]  = dloc["Tahmin (%)"].clip(lower=0, upper=15)
-
-    # Etiket: Direk Kodu varsa, yoksa D1..DN
-    if "Direk Kodu" in dloc.columns:
-        lab = dloc["Direk Kodu"].astype(str).str.strip()
-        lab = lab.where(~lab.isin(["", "nan", "None", "NONE"]), None)
-    else:
-        lab = None
-    if lab is None or lab.isna().all():
-        dloc["Etiket"] = [f"D{i+1}" for i in range(len(dloc))]
-    else:
-        fallback = pd.Series([f"D{i+1}" for i in range(len(dloc))], index=dloc.index)
-        dloc["Etiket"] = lab.fillna(fallback)
-
-    # Geçerli satırlar
-    dplot = dloc.dropna(subset=["Gerçek (%)", "Tahmin (%)"])
-
-    # Performans metrikleri (küçük örneklerde toleranslı)
+# 6) Basit performans
+valid = dloc[["Gerçek (%)", "Tahmin (%)"]].dropna()
+if len(valid) >= 3:
     from sklearn.metrics import r2_score, mean_squared_error
-    r2  = r2_score(dplot["Gerçek (%)"], dplot["Tahmin (%)"]) if len(dplot) >= 2 else float("nan")
-    mse = mean_squared_error(dplot["Gerçek (%)"], dplot["Tahmin (%)"]) if len(dplot) >= 1 else float("nan")
+    r2  = r2_score(valid["Gerçek (%)"], valid["Tahmin (%)"])
+    mse = mean_squared_error(valid["Gerçek (%)"], valid["Tahmin (%)"])
+else:
+    r2 = mse = float("nan")
 
-    # Grafik: Gerçek vs Tahmin (tek eksen, sade)
-    import plotly.express as px
-    fig_cmp = px.line(
-        dplot[["Etiket","Gerçek (%)","Tahmin (%)"]].melt(id_vars="Etiket", var_name="Değişken", value_name="Gerilim Düşümü (%)"),
-        x="Etiket", y="Gerilim Düşümü (%)", color="Değişken",
-        markers=True, template="plotly_white",
-        title=f"{trafo_sel} — Gerilim Düşümü (Formül vs AI)"
-    )
-    fig_cmp.add_hline(y=thr_pct, line_dash="dot", annotation_text=f"Eşik %{thr_pct:.2f}")
-    fig_cmp.update_layout(xaxis_title="Direk", yaxis_title="Gerilim Düşümü (%)")
-    st.plotly_chart(fig_cmp, use_container_width=True)
+cA, cB = st.columns(2)
+cA.metric("R²", f"{r2:.3f}" if np.isfinite(r2) else "—")
+cB.metric("MSE", f"{mse:.4f}" if np.isfinite(mse) else "—")
 
-    # Metrikleri grafiğin ALTINA yaz
-    st.caption(
-        f"**R²:** {('—' if not np.isfinite(r2) else f'{r2:.3f}')}  |  "
-        f"**MSE:** {('—' if not np.isfinite(mse) else f'{mse:.4f}')}  |  "
-        f"**Direk sayısı:** {len(dplot)}"
+# 7) Grafik: Direk Kodu bazlı, Gerçek vs Tahmin (yan yana bar)
+import plotly.express as px
+x_labels = dloc["Direk Kodu"].astype(str).fillna("—")
+plot_df = dloc.assign(**{"Direk": x_labels})[["Direk", "Gerçek (%)", "Tahmin (%)"]].melt(
+    id_vars="Direk", var_name="Yöntem", value_name="Gerilim Düşümü (%)"
+)
+fig_cmp = px.bar(
+    plot_df, x="Direk", y="Gerilim Düşümü (%)", color="Yöntem",
+    barmode="group", template="plotly_white", title=f"{trafo_sel} — 5 En Yakın Direk: Gerçek vs AI"
+)
+fig_cmp.add_hline(y=thr_pct, line_dash="dot", annotation_text=f"Eşik %{thr_pct:.2f}")
+fig_cmp.update_layout(xaxis_title="Direk", yaxis_title="Gerilim Düşümü (%)")
+st.plotly_chart(fig_cmp, use_container_width=True)
+
+# (Opsiyonel) Kısa tablo
+with st.expander("Detay Tablo (5 Direk)"):
+    st.dataframe(
+        dloc[["Direk Kodu","Mesafe (m)","Yük (kW)","Gerçek (%)","Tahmin (%)"]]
+        .style.format({"Mesafe (m)":"{:.0f}", "Yük (kW)":"{:.0f}", "Gerçek (%)":"{:.2f}", "Tahmin (%)":"{:.2f}"}),
+        use_container_width=True
     )
+
 
     
 
