@@ -13,3 +13,5 @@ scikit-learn
 statsmodels
 lightgbm
 shap
+prophet
+statsmodels
