@@ -399,7 +399,7 @@ if selected == "Talep Girdisi":
         fig_diff.add_hline(y=0, line_dash="dot")
         st.plotly_chart(fig_diff, use_container_width=True)
 
-# ===================== SAYFA 2: Gerilim Düşümü — Gerçek Veri & AI (Trafo Bazlı Özet) =====================
+# ===================== SAYFA 2: Gerilim Düşümü — Gerçek Veri & AI =====================
 elif selected == "Gerilim Düşümü":
     st.subheader("📉 Gerilim Düşümü ")
 
@@ -586,9 +586,9 @@ elif selected == "Gerilim Düşümü":
             use_container_width=True
         )
 
-# ===================== SAYFA 3: Forecasting (Holt-Winters + Prophet, 2025 görünüm) =====================
+# ===================== SAYFA 3: Forecasting (Sadece Prophet, doğal tarih) =====================
 elif selected == "Forecasting":
-    st.subheader("📈 Yük Tahmini (Forecasting) — Günlük")
+    st.subheader("📈 Yük Tahmini (Forecasting) — Prophet")
 
     # ---------- Girdiler ----------
     c1, c2, c3 = st.columns([1,1,1])
@@ -599,27 +599,22 @@ elif selected == "Forecasting":
     with c3:
         agg = st.selectbox("Zaman toplaması", ["Günlük Ortalama", "Günlük Toplam"], index=0)
 
-    # ---------- Veri: smart_grid_dataset.csv zorunlu ----------
+    # ---------- Veri: smart_grid_dataset.csv ----------
     if ext_df is None or ext_df.empty:
         st.error("smart_grid_dataset.csv bulunamadı/boş."); st.stop()
 
-    # Kolon isimlerini normalize et (timestamp & load_kw yoksa en makul eşleşmeyi bul)
-    import re
+    # Kolon tespiti: timestamp & load_kw öncelikli, yoksa benzerleri
     cols_lower = {c.lower(): c for c in ext_df.columns}
-
-    # Zaman kolonu tespiti
     time_col = None
     for key in ["timestamp","datetime","date","tarih","ds"]:
         if key in cols_lower:
             time_col = cols_lower[key]; break
     if time_col is None:
-        # isimle bulunamadıysa, parse edilebilirlikten yakala
         for c in ext_df.columns:
             parsed = pd.to_datetime(ext_df[c], errors="coerce")
             if parsed.notna().mean() > 0.6:
                 time_col = c; break
 
-    # Yük kolonu tespiti
     load_col = None
     for key in ["load_kw","load","power_kw","kw","value","y"]:
         if key in cols_lower:
@@ -630,10 +625,8 @@ elif selected == "Forecasting":
             load_col = numeric_candidates[0]
 
     if time_col is None or load_col is None:
-        st.error("CSV'de zaman/yük kolonları bulunamadı. Lütfen dataset kolon adlarını kontrol edin.")
-        st.stop()
+        st.error("CSV'de zaman/yük kolonları tespit edilemedi."); st.stop()
 
-    # Temel dataframe
     df_raw = ext_df[[time_col, load_col]].rename(columns={time_col: "ds", load_col: "y"}).copy()
     df_raw["ds"] = pd.to_datetime(df_raw["ds"], errors="coerce")
     df_raw["y"]  = pd.to_numeric(df_raw["y"], errors="coerce")
@@ -647,26 +640,43 @@ elif selected == "Forecasting":
     else:
         series = df_raw.set_index("ds")["y"].resample("D").sum().interpolate("time")
 
-    ts = series.reset_index()
-    ts.columns = ["ds","y"]
-
+    ts = series.reset_index().rename(columns={"index":"ds"})
     if len(ts) <= holdout_days + 30:
-        st.error("Zaman serisi çok kısa. Test penceresini küçült veya veri aralığını artır."); st.stop()
+        st.error("Zaman serisi kısa. Test penceresini küçült veya veri aralığını artır."); st.stop()
 
     # Train/Test
     cutoff = ts["ds"].max() - pd.Timedelta(days=int(holdout_days))
     train = ts[ts["ds"] <= cutoff].copy()
     test  = ts[ts["ds"] >  cutoff].copy()
-    y_train = train.set_index("ds")["y"]
-    y_test  = test.set_index("ds")["y"]
 
-    # Görselleştirme için tarihleri zorunlu 2025'e taşı (verinin kendisini değiştirmiyoruz)
-    def as_2025(df):
-        df = df.copy()
-        df["ds"] = pd.to_datetime(df["ds"]).apply(lambda d: d.replace(year=2025))
-        return df
+    # ===== Prophet =====
+    try:
+        from prophet import Prophet
+    except Exception as e:
+        st.error(f"Prophet yüklenemedi: {e} (requirements.txt'e 'prophet' ekleyin)"); st.stop()
 
-    # ---------- Metrik fonksiyonları ----------
+    m = Prophet(seasonality_mode="additive",
+                yearly_seasonality=False, daily_seasonality=False)
+    m.add_seasonality(name="weekly", period=7, fourier_order=6)  # haftalık sezon
+
+    m.fit(train.rename(columns={"ds":"ds","y":"y"}))
+
+    # Test tahmini
+    test_pred = m.predict(test[["ds"]])
+    yhat_test = pd.Series(test_pred["yhat"].values, index=test["ds"].values)
+
+    # İleri tahmin
+    future = m.make_future_dataframe(periods=int(horizon), freq="D", include_history=False)
+    fut = m.predict(future)
+    fc = pd.DataFrame({
+        "ds": fut["ds"],
+        "yhat": fut["yhat"],
+        "yhat_low": fut["yhat_lower"],
+        "yhat_high": fut["yhat_upper"]
+    })
+
+    # ---------- Metrikler ----------
+    import numpy as np
     def _rmse(y_true, y_pred):
         yt, yp = np.array(y_true), np.array(y_pred)
         return float(np.sqrt(np.mean((yt - yp)**2)))
@@ -682,121 +692,41 @@ elif selected == "Forecasting":
         denom = float(np.mean(np.abs(y_true)))
         return float(rm/denom*100) if denom > 0 else np.nan
 
-    import plotly.graph_objects as go
+    y_test = test.set_index("ds")["y"]
+    rmse  = _rmse(y_test.values, yhat_test.values)
+    mae   = _mae(y_test.values, yhat_test.values)
+    mape  = _mape(y_test.values, yhat_test.values)
+    rmsep = _rmse_pct(y_test.values, yhat_test.values)
 
-    # =========================================================
-    # 1) HOLT-WINTERS
-    # =========================================================
-    st.markdown("## 🧮 Holt-Winters")
-
-    from statsmodels.tsa.holtwinters import ExponentialSmoothing
-    season_periods = 7  # günlük seride haftalık sezonsalite
-
-    hw_model = ExponentialSmoothing(y_train, trend="add", seasonal="add", seasonal_periods=season_periods)
-    hw_fit = hw_model.fit(optimized=True, use_brute=True)
-
-    yhat_test_hw = hw_fit.forecast(len(y_test))
-    fut_vals_hw  = hw_fit.forecast(int(horizon))
-    # Güven bandı: residual std
-    resid_hw = (y_train - hw_fit.fittedvalues).dropna()
-    s_hw = float(resid_hw.std()) if len(resid_hw) else 0.0
-    fc_hw = pd.DataFrame({
-        "ds": pd.date_range(ts["ds"].max() + pd.Timedelta(days=1), periods=int(horizon), freq="D"),
-        "yhat": fut_vals_hw.values
-    })
-    fc_hw["yhat_low"]  = fc_hw["yhat"] - 1.96*s_hw
-    fc_hw["yhat_high"] = fc_hw["yhat"] + 1.96*s_hw
-
-    # Metrikler
-    rmse_hw  = _rmse(y_test.values, yhat_test_hw.values)
-    mae_hw   = _mae(y_test.values, yhat_test_hw.values)
-    mape_hw  = _mape(y_test.values, yhat_test_hw.values)
-    rmp_hw   = _rmse_pct(y_test.values, yhat_test_hw.values)
-
-    cA1, cA2, cA3, cA4 = st.columns(4)
-    cA1.metric("RMSE", f"{rmse_hw:,.2f}")
-    cA2.metric("MAE",  f"{mae_hw:,.2f}")
-    cA3.metric("MAPE", f"%{mape_hw:,.2f}" if np.isfinite(mape_hw) else "—")
-    cA4.metric("RMSE%", f"%{rmp_hw:,.2f}" if np.isfinite(rmp_hw) else "—")
-
-    # Grafik (2025 görünüm)
-    train_hw = as_2025(train)
-    test_hw  = as_2025(test)
-    fc_plot_hw = as_2025(fc_hw)
-    yhat_test_plot_hw = yhat_test_hw.copy()
-    yhat_test_plot_hw.index = test_hw["ds"]
-
-    fig_hw = go.Figure()
-    fig_hw.add_trace(go.Scatter(x=train_hw["ds"], y=train_hw["y"], mode="lines", name="Gerçek (Train)"))
-    fig_hw.add_trace(go.Scatter(x=test_hw["ds"],  y=test_hw["y"],  mode="lines", name="Gerçek (Test)"))
-    fig_hw.add_trace(go.Scatter(x=yhat_test_plot_hw.index, y=yhat_test_plot_hw.values, mode="lines", name="Test Tahmini"))
-    fig_hw.add_trace(go.Scatter(x=fc_plot_hw["ds"], y=fc_plot_hw["yhat"], mode="lines", name="İleri Tahmin"))
-    fig_hw.add_trace(go.Scatter(x=fc_plot_hw["ds"], y=fc_plot_hw["yhat_low"],  mode="lines", name="Alt Band", line=dict(dash="dot")))
-    fig_hw.add_trace(go.Scatter(x=fc_plot_hw["ds"], y=fc_plot_hw["yhat_high"], mode="lines", name="Üst Band", line=dict(dash="dot")))
-    fig_hw.update_layout(template="plotly_white", title="Holt-Winters — Geçmiş, Test ve İleri Tahmin (2025 görünüm)",
-                         xaxis_title="Tarih (2025)", yaxis_title="kW", legend_title="Seri")
-    st.plotly_chart(fig_hw, use_container_width=True)
+    cM1, cM2, cM3, cM4 = st.columns(4)
+    cM1.metric("RMSE", f"{rmse:,.2f}")
+    cM2.metric("MAE",  f"{mae:,.2f}")
+    cM3.metric("MAPE", f"%{mape:,.2f}" if np.isfinite(mape) else "—")
+    cM4.metric("RMSE%", f"%{rmsep:,.2f}" if np.isfinite(rmsep) else "—")
 
     st.divider()
 
-    # =========================================================
-    # 2) PROPHET
-    # =========================================================
-    st.markdown("## 🔮 Prophet")
-    try:
-        from prophet import Prophet
+    # ---------- Grafik (doğal tarih) ----------
+    import plotly.graph_objects as go
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=train["ds"], y=train["y"], mode="lines", name="Gerçek (Train)"))
+    fig.add_trace(go.Scatter(x=test["ds"],  y=test["y"],  mode="lines", name="Gerçek (Test)"))
+    fig.add_trace(go.Scatter(x=yhat_test.index, y=yhat_test.values, mode="lines", name="Test Tahmini"))
+    fig.add_trace(go.Scatter(x=fc["ds"], y=fc["yhat"], mode="lines", name="İleri Tahmin"))
+    fig.add_trace(go.Scatter(x=fc["ds"], y=fc["yhat_low"],  mode="lines", name="Alt Band", line=dict(dash="dot")))
+    fig.add_trace(go.Scatter(x=fc["ds"], y=fc["yhat_high"], mode="lines", name="Üst Band", line=dict(dash="dot")))
+    fig.update_layout(template="plotly_white",
+                      title="Prophet — Geçmiş, Test ve İleri Tahmin",
+                      xaxis_title="Tarih", yaxis_title="kW", legend_title="Seri")
+    st.plotly_chart(fig, use_container_width=True)
 
-        m = Prophet(seasonality_mode="additive", yearly_seasonality=False, daily_seasonality=False)
-        m.add_seasonality(name="weekly", period=7, fourier_order=6)  # haftalık sezon
-
-        m.fit(train.rename(columns={"ds":"ds","y":"y"}))
-
-        # Test tahmini
-        test_pred = m.predict(test[["ds"]])
-        yhat_test_pr = pd.Series(test_pred["yhat"].values, index=test["ds"].values)
-
-        # İleri tahmin
-        future = m.make_future_dataframe(periods=int(horizon), freq="D", include_history=False)
-        fut = m.predict(future)
-        fc_pr = pd.DataFrame({
-            "ds": fut["ds"],
-            "yhat": fut["yhat"],
-            "yhat_low": fut["yhat_lower"],
-            "yhat_high": fut["yhat_upper"]
-        })
-
-        # Metrikler
-        rmse_pr  = _rmse(y_test.values, yhat_test_pr.values)
-        mae_pr   = _mae(y_test.values, yhat_test_pr.values)
-        mape_pr  = _mape(y_test.values, yhat_test_pr.values)
-        rmp_pr   = _rmse_pct(y_test.values, yhat_test_pr.values)
-
-        cB1, cB2, cB3, cB4 = st.columns(4)
-        cB1.metric("RMSE", f"{rmse_pr:,.2f}")
-        cB2.metric("MAE",  f"{mae_pr:,.2f}")
-        cB3.metric("MAPE", f"%{mape_pr:,.2f}" if np.isfinite(mape_pr) else "—")
-        cB4.metric("RMSE%", f"%{rmp_pr:,.2f}" if np.isfinite(rmp_pr) else "—")
-
-        # Grafik (2025 görünüm)
-        train_pr = as_2025(train)
-        test_pr  = as_2025(test)
-        fc_plot_pr = as_2025(fc_pr)
-        yhat_test_plot_pr = yhat_test_pr.copy()
-        yhat_test_plot_pr.index = test_pr["ds"]
-
-        fig_pr = go.Figure()
-        fig_pr.add_trace(go.Scatter(x=train_pr["ds"], y=train_pr["y"], mode="lines", name="Gerçek (Train)"))
-        fig_pr.add_trace(go.Scatter(x=test_pr["ds"],  y=test_pr["y"],  mode="lines", name="Gerçek (Test)"))
-        fig_pr.add_trace(go.Scatter(x=yhat_test_plot_pr.index, y=yhat_test_plot_pr.values, mode="lines", name="Test Tahmini"))
-        fig_pr.add_trace(go.Scatter(x=fc_plot_pr["ds"], y=fc_plot_pr["yhat"], mode="lines", name="İleri Tahmin"))
-        fig_pr.add_trace(go.Scatter(x=fc_plot_pr["ds"], y=fc_plot_pr["yhat_low"],  mode="lines", name="Alt Band", line=dict(dash="dot")))
-        fig_pr.add_trace(go.Scatter(x=fc_plot_pr["ds"], y=fc_plot_pr["yhat_high"], mode="lines", name="Üst Band", line=dict(dash="dot")))
-        fig_pr.update_layout(template="plotly_white", title="Prophet — Geçmiş, Test ve İleri Tahmin (2025 görünüm)",
-                             xaxis_title="Tarih (2025)", yaxis_title="kW", legend_title="Seri")
-        st.plotly_chart(fig_pr, use_container_width=True)
-
-    except Exception as e:
-        st.error(f"Prophet çalıştırılamadı: {e} — requirements.txt'e 'prophet' eklemen gerekir.")
+    # ---------- İndirilebilir çıktı ----------
+    out = fc[["ds","yhat","yhat_low","yhat_high"]].rename(
+        columns={"ds":"tarih","yhat":"tahmin_kw","yhat_low":"alt","yhat_high":"üst"}
+    )
+    st.download_button("📥 Tahmini CSV indir",
+                       data=out.to_csv(index=False).encode("utf-8"),
+                       file_name="forecast_prophet.csv", mime="text/csv")
 
 
 
