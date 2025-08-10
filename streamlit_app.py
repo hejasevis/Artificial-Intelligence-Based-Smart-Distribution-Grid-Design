@@ -592,10 +592,6 @@ elif selected == "Forecasting":
     out = fc[["ds","yhat","yhat_low","yhat_high"]].rename(
         columns={"ds":"tarih","yhat":"tahmin_kw","yhat_low":"alt","yhat_high":"üst"}
     )
-    st.download_button("📥 Tahmini CSV indir",
-                       data=out.to_csv(index=False).encode("utf-8"),
-                       file_name="forecast_prophet.csv", mime="text/csv")
-
     st.divider()
 
     # Metrikler (altta)
