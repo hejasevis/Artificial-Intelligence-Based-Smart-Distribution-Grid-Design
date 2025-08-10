@@ -586,40 +586,70 @@ elif selected == "Gerilim Düşümü":
             use_container_width=True
         )
 
-# ===================== SAYFA 3: Forecasting (Holt-Winters + Prophet, alt alta) =====================
+tamam—istediğin gibi **kolonları otomatik eşleştiren**, **tüm tarihleri 2025’e sabitleyen**, **Holt-Winters ve Prophet sonuçlarını alt alta** gösteren, metrikleri (RMSE, MAE, MAPE, RMSE%) veren **tam Forecasting sayfası** aşağıda.
+Bunu projendeki `elif selected == "Forecasting":` bloğunun **tamamı** yerine yapıştır.
+
+```python
+# ===================== SAYFA 3: Forecasting (Holt-Winters + Prophet, 2025 görünüm) =====================
 elif selected == "Forecasting":
     st.subheader("📈 Yük Tahmini (Forecasting) — Günlük")
 
     # ---------- Girdiler ----------
-    c1, c2, c3, c4 = st.columns([1,1,1,1])
+    c1, c2, c3 = st.columns([1,1,1])
     with c1:
         horizon = st.number_input("Tahmin ufku (gün)", 7, 180, 30, 1)
     with c2:
         holdout_days = st.number_input("Test penceresi (gün)", 7, 90, 30, 1)
     with c3:
         agg = st.selectbox("Zaman toplaması", ["Günlük Ortalama", "Günlük Toplam"], index=0)
-    with c4:
-        show_2025 = st.toggle("Grafiği 2025 yılında göster (sadece görsel)", value=False)
 
     # ---------- Veri: smart_grid_dataset.csv zorunlu ----------
     if ext_df is None or ext_df.empty:
         st.error("smart_grid_dataset.csv bulunamadı/boş."); st.stop()
 
-    # Kolonlar: timestamp & load_kw (senin dosyanda böyle)
-    if not {"timestamp", "load_kw"}.issubset(set(ext_df.columns)):
-        st.error("CSV kolonları 'timestamp' ve 'load_kw' olmalı."); st.stop()
+    # Kolon isimlerini normalize et (timestamp & load_kw yoksa en makul eşleşmeyi bul)
+    import re
+    cols_lower = {c.lower(): c for c in ext_df.columns}
 
-    df_raw = ext_df[["timestamp", "load_kw"]].rename(columns={"timestamp":"ds", "load_kw":"y"}).copy()
+    # Zaman kolonu tespiti
+    time_col = None
+    for key in ["timestamp","datetime","date","tarih","ds"]:
+        if key in cols_lower:
+            time_col = cols_lower[key]; break
+    if time_col is None:
+        # isimle bulunamadıysa, parse edilebilirlikten yakala
+        for c in ext_df.columns:
+            parsed = pd.to_datetime(ext_df[c], errors="coerce")
+            if parsed.notna().mean() > 0.6:
+                time_col = c; break
+
+    # Yük kolonu tespiti
+    load_col = None
+    for key in ["load_kw","load","power_kw","kw","value","y"]:
+        if key in cols_lower:
+            load_col = cols_lower[key]; break
+    if load_col is None:
+        numeric_candidates = [c for c in ext_df.columns if pd.api.types.is_numeric_dtype(ext_df[c])]
+        if numeric_candidates:
+            load_col = numeric_candidates[0]
+
+    if time_col is None or load_col is None:
+        st.error("CSV'de zaman/yük kolonları bulunamadı. Lütfen dataset kolon adlarını kontrol edin.")
+        st.stop()
+
+    # Temel dataframe
+    df_raw = ext_df[[time_col, load_col]].rename(columns={time_col: "ds", load_col: "y"}).copy()
     df_raw["ds"] = pd.to_datetime(df_raw["ds"], errors="coerce")
     df_raw["y"]  = pd.to_numeric(df_raw["y"], errors="coerce")
     df_raw = df_raw.dropna(subset=["ds","y"]).sort_values("ds")
+    if df_raw.empty:
+        st.error("Seçilen kolonlardan tarih/yük üretilemedi."); st.stop()
 
     # Günlük toplama
-    rule = "D"
     if "Ortalama" in agg:
-        series = df_raw.set_index("ds")["y"].resample(rule).mean().interpolate("time")
+        series = df_raw.set_index("ds")["y"].resample("D").mean().interpolate("time")
     else:
-        series = df_raw.set_index("ds")["y"].resample(rule).sum().interpolate("time")
+        series = df_raw.set_index("ds")["y"].resample("D").sum().interpolate("time")
 
     ts = series.reset_index()
     ts.columns = ["ds","y"]
@@ -634,17 +664,13 @@ elif selected == "Forecasting":
     y_train = train.set_index("ds")["y"]
     y_test  = test.set_index("ds")["y"]
 
-    # Görselde 2025'e kaydırma (sadece çizimde kullanılacak)
+    # Görselleştirme için tarihleri zorunlu 2025'e taşı (verinin kendisini değiştirmiyoruz)
     def as_2025(df):
-        if not show_2025: return df.copy()
         df = df.copy()
-        df["ds"] = pd.to_datetime(df["ds"])
-        base_year = 2025
-        df["ds"] = df["ds"].apply(lambda d: d.replace(year=base_year))
+        df["ds"] = pd.to_datetime(df["ds"]).apply(lambda d: d.replace(year=2025))
         return df
 
-    # ---------- Ortak metrik fonksiyonları ----------
-    import numpy as np
+    # ---------- Metrik fonksiyonları ----------
     def _rmse(y_true, y_pred):
         yt, yp = np.array(y_true), np.array(y_pred)
         return float(np.sqrt(np.mean((yt - yp)**2)))
@@ -660,21 +686,22 @@ elif selected == "Forecasting":
         denom = float(np.mean(np.abs(y_true)))
         return float(rm/denom*100) if denom > 0 else np.nan
 
+    import plotly.graph_objects as go
+
     # =========================================================
     # 1) HOLT-WINTERS
     # =========================================================
     st.markdown("## 🧮 Holt-Winters")
 
     from statsmodels.tsa.holtwinters import ExponentialSmoothing
-    # Sezonsalite: günlük toplam/ortalama için haftalık pattern makul
-    season_periods = 7
+    season_periods = 7  # günlük seride haftalık sezonsalite
 
     hw_model = ExponentialSmoothing(y_train, trend="add", seasonal="add", seasonal_periods=season_periods)
     hw_fit = hw_model.fit(optimized=True, use_brute=True)
 
     yhat_test_hw = hw_fit.forecast(len(y_test))
     fut_vals_hw  = hw_fit.forecast(int(horizon))
-    # Güven bandı: resid std
+    # Güven bandı: residual std
     resid_hw = (y_train - hw_fit.fittedvalues).dropna()
     s_hw = float(resid_hw.std()) if len(resid_hw) else 0.0
     fc_hw = pd.DataFrame({
@@ -696,8 +723,7 @@ elif selected == "Forecasting":
     cA3.metric("MAPE", f"%{mape_hw:,.2f}" if np.isfinite(mape_hw) else "—")
     cA4.metric("RMSE%", f"%{rmp_hw:,.2f}" if np.isfinite(rmp_hw) else "—")
 
-    # Grafik
-    import plotly.graph_objects as go
+    # Grafik (2025 görünüm)
     train_hw = as_2025(train)
     test_hw  = as_2025(test)
     fc_plot_hw = as_2025(fc_hw)
@@ -711,10 +737,8 @@ elif selected == "Forecasting":
     fig_hw.add_trace(go.Scatter(x=fc_plot_hw["ds"], y=fc_plot_hw["yhat"], mode="lines", name="İleri Tahmin"))
     fig_hw.add_trace(go.Scatter(x=fc_plot_hw["ds"], y=fc_plot_hw["yhat_low"],  mode="lines", name="Alt Band", line=dict(dash="dot")))
     fig_hw.add_trace(go.Scatter(x=fc_plot_hw["ds"], y=fc_plot_hw["yhat_high"], mode="lines", name="Üst Band", line=dict(dash="dot")))
-    fig_hw.update_layout(template="plotly_white", title="Holt-Winters — Geçmiş, Test ve İleri Tahmin",
-                         xaxis_title="Tarih", yaxis_title="kW", legend_title="Seri",
-                         xaxis=dict(tickformat="%Y-%m-%d" if not show_2025 else "%Y"))
-
+    fig_hw.update_layout(template="plotly_white", title="Holt-Winters — Geçmiş, Test ve İleri Tahmin (2025 görünüm)",
+                         xaxis_title="Tarih (2025)", yaxis_title="kW", legend_title="Seri")
     st.plotly_chart(fig_hw, use_container_width=True)
 
     st.divider()
@@ -727,8 +751,7 @@ elif selected == "Forecasting":
         from prophet import Prophet
 
         m = Prophet(seasonality_mode="additive", yearly_seasonality=False, daily_seasonality=False)
-        # Haftalık sezonsalite
-        m.add_seasonality(name="weekly", period=7, fourier_order=6)
+        m.add_seasonality(name="weekly", period=7, fourier_order=6)  # haftalık sezon
 
         m.fit(train.rename(columns={"ds":"ds","y":"y"}))
 
@@ -758,7 +781,7 @@ elif selected == "Forecasting":
         cB3.metric("MAPE", f"%{mape_pr:,.2f}" if np.isfinite(mape_pr) else "—")
         cB4.metric("RMSE%", f"%{rmp_pr:,.2f}" if np.isfinite(rmp_pr) else "—")
 
-        # Grafik
+        # Grafik (2025 görünüm)
         train_pr = as_2025(train)
         test_pr  = as_2025(test)
         fc_plot_pr = as_2025(fc_pr)
@@ -772,15 +795,13 @@ elif selected == "Forecasting":
         fig_pr.add_trace(go.Scatter(x=fc_plot_pr["ds"], y=fc_plot_pr["yhat"], mode="lines", name="İleri Tahmin"))
         fig_pr.add_trace(go.Scatter(x=fc_plot_pr["ds"], y=fc_plot_pr["yhat_low"],  mode="lines", name="Alt Band", line=dict(dash="dot")))
         fig_pr.add_trace(go.Scatter(x=fc_plot_pr["ds"], y=fc_plot_pr["yhat_high"], mode="lines", name="Üst Band", line=dict(dash="dot")))
-        fig_pr.update_layout(template="plotly_white", title="Prophet — Geçmiş, Test ve İleri Tahmin",
-                             xaxis_title="Tarih", yaxis_title="kW", legend_title="Seri",
-                             xaxis=dict(tickformat="%Y-%m-%d" if not show_2025 else "%Y"))
-
+        fig_pr.update_layout(template="plotly_white", title="Prophet — Geçmiş, Test ve İleri Tahmin (2025 görünüm)",
+                             xaxis_title="Tarih (2025)", yaxis_title="kW", legend_title="Seri")
         st.plotly_chart(fig_pr, use_container_width=True)
 
     except Exception as e:
-        st.error(f"Prophet çalıştırılamadı: {e}\n(requirements.txt'e 'prophet' eklemen gerekir)")
-
+        st.error(f"Prophet çalıştırılamadı: {e} — requirements.txt'e 'prophet' eklemen gerekir.")
+```
 
 
 # ===================== SAYFA 4: Arıza / Anomali =====================
