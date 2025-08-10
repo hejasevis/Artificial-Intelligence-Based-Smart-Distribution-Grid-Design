@@ -4,7 +4,7 @@ This repository contains a **Streamlit Project** for an **AI-Assisted Smart Dist
 ## Features
 - 🗺️ **Map & Routing:** Route from demand point to a selected transformer; distinguish **existing** vs **proposed** poles along the route.
 - ⚡ **Voltage Drop Score:** Simplified **k·L·N** formula per route.
-- 🤖 **ML Predictions (Demo):** RandomForest / LightGBM for quick predictions (can run on synthetic data when real data is absent).
+- 🤖 **ML Predictions:** RandomForest / LightGBM for quick predictions (can run on synthetic data when real data is absent).
 - 🔍 **Anomaly Detection:** Rolling window logic + user controls (test window, contamination, rolling length) with summary metrics.
 - 🧭 **Parameter Controls:** Aggregation, holdout length, anomaly ratio, rolling window, etc.
 - 🧩 **Modular Functions:** Single source of truth for `vdrop_kLN`, separate modules for routing/distance/outputs.
