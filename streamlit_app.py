@@ -314,35 +314,27 @@ if selected == "Talep Girdisi":
     st.subheader("📡 Oluşturulan Şebeke Hattı")
     st_folium(m2, height=620, width="100%", key="result_map_basic")
 
-# ===================== SAYFA 2: Gerilim Düşümü (k·L·N) =====================
+# ===================== SAYFA 2: Gerilim Düşümü (k·L·N + AI) =====================
 elif selected == "Gerilim Düşümü":
-    st.subheader("📉 Gerilim Düşümü Analizi — k·L·N Modeli")
-    st.caption("Formül: **Gerilim Düşümü (%) = k × Hat Uzunluğu (L, m) × Yük (N, kW)**")
-
-    with st.expander("Bu sayfa ne yapıyor?", expanded=True):
-        st.markdown("""
-- **Amaç:** L ve N değişince gerilim düşümünün nasıl davrandığını **tek bakışta** gösterir.
-- **Eşik testi:** Girilen eşiğe göre **uygun/uygunsuz** durumunu sayı ve grafikle özetler.
-- **A/B Senaryo:** *A = mevcut durum*, *B = önerilen tasarım* gibi iki farklı **durumu** karşılaştırır (bu trafo A/B değil).
-        """)
+    st.subheader("📉 Gerilim Düşümü Analizi — k·L·N + AI")
+    st.caption("Formül: Gerilim Düşümü (%) = k × L (m) × N (kW). AI, bu ilişkiyi veriden öğrenerek kalibre eder ve öneri üretir.")
 
     # --- Parametreler
     with st.sidebar.expander("🔧 Parametreler", expanded=True):
         k_const = st.number_input("k sabiti", 0.0, 1.0, 0.0001, 0.0001, key="gd_k")
         thr_pct = st.number_input("Eşik (Gerilim Düşümü, %)", 0.5, 20.0, 5.0, 0.5, key="gd_thr")
-
-        # Kesit grafikleri için sabit değerler
         P_fixed = st.slider("Sabit N (kW) — L'ye karşı eğri", 1, 1000, 150, 1)
         L_fixed = st.slider("Sabit L (m) — N'e karşı eğri", 10, 5000, 600, 10)
+        use_ai  = st.toggle("🤖 AI Modu (öğrenilmiş tahmin ve öneri)", value=True)
 
-    # --- Yardımcı: formül
+    # --- Formül fonksiyonu
     def vdrop_kLN(L_m: float, P_kw: float, k: float) -> float:
         try:
             return float(k) * float(L_m) * float(P_kw)
         except Exception:
             return float("nan")
 
-    # ========= Kesit grafikleri (ısı haritası yok) =========
+    # ========= Kesit grafikleri (her zaman formül temelli çiziyoruz) =========
     st.markdown("### 📈 Kesit Grafikleri (Eşik çizgili)")
 
     # (1) Sabit N'de, L'ye karşı
@@ -356,7 +348,7 @@ elif selected == "Gerilim Düşümü":
     # Eşik altında kalmak için max L
     L_max = (thr_pct / (k_const * P_fixed)) if k_const > 0 and P_fixed > 0 else np.inf
     L_txt = f"{L_max:.0f} m" if np.isfinite(L_max) else "∞"
-    st.caption(f"**Sabit N={P_fixed} kW** için **eşik altında kalmak** istiyorsan: **L ≤ {L_txt}**")
+    st.caption(f"**Sabit N={P_fixed} kW** için eşik altında kalmak: **L ≤ {L_txt}**")
 
     # (2) Sabit L'de, N'e karşı
     Ns = np.linspace(1, 1000, 150)
@@ -366,67 +358,157 @@ elif selected == "Gerilim Düşümü":
     fig_N.add_hline(y=thr_pct, line_dash="dot", annotation_text=f"Eşik %{thr_pct:.2f}")
     fig_N.update_layout(xaxis_title="Yük N (kW)", yaxis_title="Gerilim Düşümü (%)")
 
-    # Eşik altında kalmak için max N
-    N_max = (thr_pct / (k_const * L_fixed)) if k_const > 0 and L_fixed > 0 else np.inf
-    N_txt = f"{N_max:.0f} kW" if np.isfinite(N_max) else "∞"
-    st.caption(f"**Sabit L={L_fixed} m** için **eşik altında kalmak** istiyorsan: **N ≤ {N_txt}**")
-
     c1, c2 = st.columns(2)
     c1.plotly_chart(fig_L, use_container_width=True)
     c2.plotly_chart(fig_N, use_container_width=True)
 
     st.divider()
 
-    # ========= A/B Senaryo Karşılaştırma =========
-    st.markdown("### 🥊 A/B Senaryo Karşılaştırma")
-    st.caption("**A = mevcut durum**, **B = önerilen tasarım** gibi düşün. İkisi de (L, N, k) üçlüsüyle tanımlanır.")
+    # ========= 🤖 AI: Eğitim + Tahmin + Öneri =========
+    if use_ai:
+        st.markdown("### 🤖 AI: Öğrenilmiş Tahmin ve Öneri")
 
-    colA = st.columns(3)
-    with colA[0]:
-        name_A = st.text_input("Senaryo A adı", "Mevcut")
-    with colA[1]:
-        L_A = st.number_input("A — L (m)", 10, 10000, 600, 10)
-    with colA[2]:
-        N_A = st.number_input("A — N (kW)", 1, 5000, 200, 1)
+        # ---- 1) Veri hazırlama
+        # Eğer ext_df içinde L_m / P_kw / k / dv_pct gerçek/sentetik veri varsa onu kullan,
+        # yoksa sentetik örneklem üret.
+        def build_training_df(ext_df):
+            try:
+                cand_cols = {c.lower(): c for c in ext_df.columns}
+            except Exception:
+                cand_cols = {}
+            has_all = all(x in cand_cols for x in ["l_m","p_kw","k","dv_pct"])
+            if ext_df is not None and len(ext_df) > 0 and has_all:
+                df = pd.DataFrame({
+                    "L_m":    ext_df[cand_cols["l_m"]],
+                    "P_kw":   ext_df[cand_cols["p_kw"]],
+                    "k":      ext_df[cand_cols["k"]],
+                    "dv_pct": ext_df[cand_cols["dv_pct"]]
+                }).dropna()
+                # clip aşırı uçları
+                df["dv_pct"] = df["dv_pct"].clip(0, 1000)
+                return df
 
-    colB = st.columns(3)
-    with colB[0]:
-        name_B = st.text_input("Senaryo B adı", "Öneri")
-    with colB[1]:
-        L_B = st.number_input("B — L (m)", 10, 10000, 400, 10)
-    with colB[2]:
-        N_B = st.number_input("B — N (kW)", 1, 5000, 120, 1)
+            # fallback: sentetik set (k çevresinde jitter)
+            rng = np.random.default_rng(0)
+            L = rng.uniform(10, 5000, 4000)
+            P = rng.uniform(1, 1000, 4000)
+            k_vals = rng.normal(loc=k_const if k_const>0 else 1e-4, scale=0.25*(k_const if k_const>0 else 1e-4), size=4000)
+            k_vals = np.clip(k_vals, 1e-6, 1.0)
+            dv = k_vals * L * P
+            # küçük ölçüm hatası/rasgelelik
+            dv = dv * rng.normal(1.0, 0.03, size=dv.shape)
+            df = pd.DataFrame({"L_m":L,"P_kw":P,"k":k_vals,"dv_pct":dv})
+            return df
 
-    # k sabitini A/B için ayrı ayrı denemek istersen:
-    c_k1, c_k2 = st.columns(2)
-    with c_k1:
-        k_A = st.number_input("A — k", 0.0, 1.0, float(k_const), 0.0001)
-    with c_k2:
-        k_B = st.number_input("B — k", 0.0, 1.0, float(k_const), 0.0001)
+        train_df = build_training_df(ext_df)
 
-    dv_A = vdrop_kLN(L_A, N_A, k_A)
-    dv_B = vdrop_kLN(L_B, N_B, k_B)
+        # ---- 2) Model eğitimi (hızlı, cache'li)
+        @st.cache_resource
+        def train_models(df: pd.DataFrame):
+            from lightgbm import LGBMRegressor, LGBMClassifier
+            df = df.sample(frac=1.0, random_state=42).reset_index(drop=True)
+            # Regresyon hedef: dv_pct
+            reg = LGBMRegressor(n_estimators=500, learning_rate=0.05, num_leaves=64, random_state=42)
+            reg.fit(df[["L_m","P_kw","k"]], df["dv_pct"])
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric(f"{name_A} — Gerilim Düşümü", f"%{dv_A:.2f}")
-    m2.metric(f"{name_B} — Gerilim Düşümü", f"%{dv_B:.2f}")
-    m3.metric("Eşik", f"%{thr_pct:.2f}")
-    karar = (f"{name_A} daha kötü" if dv_A > dv_B else
-             f"{name_B} daha kötü" if dv_B > dv_A else "Eşit")
-    m4.metric("Karar", karar)
+            # Sınıflama hedefi: dv_pct > thr (not: thr o anki UI; bu yüzden classifier yerine
+            # inference'ta reg tahmini > thr kontrolü kullanacağız. Yine de baseline dursun.)
+            clf = LGBMClassifier(n_estimators=250, learning_rate=0.05, num_leaves=48, random_state=42)
+            y_clf = (df["dv_pct"] > df["dv_pct"].median()).astype(int)  # kaba bir ayrım
+            clf.fit(df[["L_m","P_kw","k"]], y_clf)
 
-    comp_df = pd.DataFrame({
-        "Senaryo": [name_A, name_B],
-        "Gerilim Düşümü (%)": [dv_A, dv_B],
-        "Durum": ["Uygun" if dv_A <= thr_pct else "Uygunsuz",
-                  "Uygun" if dv_B <= thr_pct else "Uygunsuz"],
-    })
-    fig_bar = px.bar(comp_df, x="Senaryo", y="Gerilim Düşümü (%)", text_auto=True, color="Durum",
-                     template="plotly_white", title="A/B Karşılaştırma")
-    fig_bar.add_hline(y=thr_pct, line_dash="dot", annotation_text=f"Eşik %{thr_pct:.2f}")
-    st.plotly_chart(fig_bar, use_container_width=True)
+            return reg, clf
 
-    st.info("A/B’nin olayı: **iki farklı tasarım/durum**un (L, N, k) gerilim düşümlerini doğrudan kıyaslamak. Bu trafo A/B değil.")
+        try:
+            reg, clf = train_models(train_df)
+        except Exception as e:
+            st.error(f"Model eğitimi başarısız: {e}")
+            reg = clf = None
+
+        # ---- 3) AI Tahmini (anlık girdiler için)
+        colA = st.columns(3)
+        with colA[0]:
+            L_in = st.number_input("Analiz — L (m)", 10, 10000, L_fixed, 10)
+        with colA[1]:
+            N_in = st.number_input("Analiz — N (kW)", 1, 5000, P_fixed, 1)
+        with colA[2]:
+            k_in = st.number_input("Analiz — k", 0.0, 1.0, float(k_const), 0.0001)
+
+        dv_formula = vdrop_kLN(L_in, N_in, k_in)
+        if reg is not None:
+            dv_ai = float(reg.predict(pd.DataFrame([{"L_m":L_in, "P_kw":N_in, "k":k_in}]))[0])
+        else:
+            dv_ai = float("nan")
+
+        cM1, cM2, cM3 = st.columns(3)
+        cM1.metric("Formül (k·L·N)", f"%{dv_formula:.2f}")
+        cM2.metric("AI Tahmini", f"%{dv_ai:.2f}" if np.isfinite(dv_ai) else "—")
+        cM3.metric("Eşik", f"%{thr_pct:.2f}")
+
+        st.progress(min(1.0, max(0.0, dv_formula/(thr_pct*2.0)))), st.progress(min(1.0, max(0.0, (dv_ai if np.isfinite(dv_ai) else dv_formula)/(thr_pct*2.0))))
+
+        # ---- 4) Öneri (Counterfactual): Eşik altına inmek için minimal ayar
+        st.markdown("#### 🔁 Eşik Altına İnme Önerisi")
+        goal = st.selectbox("Neyi azaltmayı hedefleyelim?", ["Öncelik: L", "Öncelik: N", "Her ikisi de olur"], index=0)
+
+        def suggest_fix(L0, N0, k0, thr, reg_model=None, step_L=10, step_N=5, max_iter=1000):
+            """
+            Basit ve hızlı: küçük adımlarla L/N'yi azalt; önce L, sonra N (veya birlikte).
+            Eğer reg_model verilirse AI tahmini ile kontrol; yoksa formül.
+            """
+            def pred(Lv, Nv):
+                if reg_model is None:
+                    return vdrop_kLN(Lv, Nv, k0)
+                return float(reg_model.predict(pd.DataFrame([{"L_m":Lv,"P_kw":Nv,"k":k0}]))[0])
+
+            L_best, N_best = L0, N0
+            dv_best = pred(L_best, N_best)
+            if dv_best <= thr:
+                return L_best, N_best, dv_best, 0, 0
+
+            iter_count = 0
+            dL = dN = 0
+            while iter_count < max_iter:
+                improved = False
+                if goal in ("Öncelik: L","Her ikisi de olur") and L_best - step_L >= 10:
+                    dv_try = pred(L_best - step_L, N_best)
+                    if dv_try < dv_best:
+                        L_best -= step_L; dv_best = dv_try; dL += step_L; improved = True
+                        if dv_best <= thr: break
+                if goal in ("Öncelik: N","Her ikisi de olur") and N_best - step_N >= 1:
+                    dv_try = pred(L_best, N_best - step_N)
+                    if dv_try < dv_best:
+                        N_best -= step_N; dv_best = dv_try; dN += step_N; improved = True
+                        if dv_best <= thr: break
+                if not improved:
+                    break
+                iter_count += 1
+            return L_best, N_best, dv_best, dL, dN
+
+        L_sug, N_sug, dv_sug, dL, dN = suggest_fix(L_in, N_in, k_in, thr_pct, reg_model=reg)
+        good = dv_sug <= thr_pct
+
+        cS1, cS2, cS3 = st.columns(3)
+        cS1.metric("Önerilen L (m)", f"{L_sug:.0f}", delta=f"-{dL} m" if dL>0 else None)
+        cS2.metric("Önerilen N (kW)", f"{N_sug:.0f}", delta=f"-{dN} kW" if dN>0 else None)
+        cS3.metric("Tahmini Gerilim Düşümü", f"%{dv_sug:.2f}", delta=f"{dv_sug - dv_formula:+.2f}")
+
+        if good:
+            st.success("✅ Eşik altında bir çözüm bulundu.")
+        else:
+            st.warning("ℹ️ Eşik altına inen bir çözüm bulunamadı; k/iletken değişimi gerekebilir.")
+
+        # (Opsiyonel) Açıklanabilirlik
+        with st.expander("🪄 AI Açıklaması (opsiyonel)"):
+            try:
+                import shap
+                explainer = shap.Explainer(reg, feature_names=["L_m","P_kw","k"])
+                shap_vals = explainer(pd.DataFrame([[L_in, N_in, k_in]], columns=["L_m","P_kw","k"]))
+                sv = pd.Series(shap_vals.values[0], index=["L_m","P_kw","k"]).abs().sort_values(ascending=False)
+                fig_imp = px.bar(sv, title="Özellik Etkisi (|SHAP|)", labels={"value":"Etki","index":"Özellik"}, template="plotly_white", text_auto=True)
+                st.plotly_chart(fig_imp, use_container_width=True)
+            except Exception:
+                st.info("SHAP ortamda yok veya yüklenemedi. (requirements’a `shap` ekleyip etkinleştirebilirsin.)")
 
 
 # ===================== SAYFA 3: Forecasting =====================
