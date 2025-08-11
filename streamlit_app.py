@@ -710,6 +710,22 @@ elif selected == "Arıza ve Anomali Tespiti":
         return "Aykırı"
     ts_feats["tip"] = ts_feats.apply(fault_type, axis=1)
 
+        # ---- Parametreler ----
+    with st.expander("⚙️ Parametreler"):
+        cpa, cpb, cpc, cpd = st.columns(4)
+        with cpa:
+            AGG_MODE = st.selectbox("Zaman Ölçeği", ["Günlük Ortalama"], index=0)
+        with cpb:
+            HOLDOUT = st.number_input("Test Veri Aralığı (Gün)", min_value=1, max_value=365,
+                                      value=HOLDOUT, step=1)
+        with cpc:
+            CONTAM = st.number_input("Anomali Oranı", min_value=0.0, max_value=1.0,
+                                     value=float(CONTAM), step=0.01, format="%.2f")
+        with cpd:
+            ROLL_WIN = st.number_input("Hareketli Ortalama Penceresi (Gün)", min_value=1, max_value=365,
+                                       value=ROLL_WIN, step=1)
+
+
     # ---- Grafik ----
     import plotly.graph_objects as go
     base = ts_feats[ts_feats["anomaly"] == 0]
@@ -749,18 +765,3 @@ elif selected == "Arıza ve Anomali Tespiti":
     with st.expander("📋 Anomali Tablosu"):
         st.dataframe(anomalies, use_container_width=True)
       
-
-    # ---- Parametreler ----
-    with st.expander("⚙️ Parametreler"):
-        cpa, cpb, cpc, cpd = st.columns(4)
-        with cpa:
-            AGG_MODE = st.selectbox("Zaman Ölçeği", ["Günlük Ortalama"], index=0)
-        with cpb:
-            HOLDOUT = st.number_input("Test Veri Aralığı (Gün)", min_value=1, max_value=365,
-                                      value=HOLDOUT, step=1)
-        with cpc:
-            CONTAM = st.number_input("Anomali Oranı", min_value=0.0, max_value=1.0,
-                                     value=float(CONTAM), step=0.01, format="%.2f")
-        with cpd:
-            ROLL_WIN = st.number_input("Hareketli Ortalama Penceresi (Gün)", min_value=1, max_value=365,
-                                       value=ROLL_WIN, step=1)
