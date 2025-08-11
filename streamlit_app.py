@@ -518,7 +518,7 @@ elif selected == "Talep / Tüketim Tahmini":
 
     c1, c2, c3 = st.columns([1,1,1])
     with c1:
-        horizon = st.number_input("Tahmin ufku (gün)", 7, 180, 30, 1)
+        horizon = st.number_input("Öngörü Süresi (Gün)", 7, 180, 30, 1)
     with c2:
         holdout_days = st.number_input("Test Veri Aralığı (Gün)", 7, 90, 30, 1)
     with c3:
