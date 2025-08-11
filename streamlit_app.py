@@ -466,14 +466,7 @@ elif selected == "Gerilim Düşümü Analizi":
     dloc["Gerçek (%)"]  = dloc["Gerçek (%)"].clip(upper=15)
     dloc["Tahmin (%)"]  = dloc["Tahmin (%)"].clip(upper=15)
 
-    # 6) Basit performans
-    valid = dloc[["Gerçek (%)", "Tahmin (%)"]].dropna()
-    if len(valid) >= 3:
-        from sklearn.metrics import r2_score, mean_squared_error
-        r2  = r2_score(valid["Gerçek (%)"], valid["Tahmin (%)"])
-        mse = mean_squared_error(valid["Gerçek (%)"], valid["Tahmin (%)"])
-    else:
-        r2 = mse = float("nan")
+
 
     # 7) Grafik: Çizgi grafiği (Direk Kodu bazlı)
     import plotly.express as px
