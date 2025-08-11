@@ -497,8 +497,8 @@ elif selected == "Gerilim Düşümü Analizi":
 
     # 8) Expander içinde R², MSE ve tablo
     with st.expander("📊 Detaylı Sonuçlar"):
-        st.markdown(f"**R²:** {r2:.3f}" if np.isfinite(r2) else "**R²:** —")
-        st.markdown(f"**MSE:** {mse:.4f}" if np.isfinite(mse) else "**MSE:** —")
+        st.markdown(f"**R²:** {r2:.3f}" if np.isfinite(r2) else "**R²:** ")
+        st.markdown(f"**MSE:** {mse:.4f}" if np.isfinite(mse) else "**MSE:**")
         st.dataframe(
             dloc[["Direk Kodu","Mesafe (m)","Yük (kW)","Gerçek (%)","Tahmin (%)"]]
             .style.format({
@@ -625,11 +625,11 @@ elif selected == "Talep / Tüketim Tahmini":
         cM3.metric("MAPE", f"%{mape:,.2f}" if np.isfinite(mape) else "—")
         cM4.metric("RMSE%", f"%{rmsep:,.2f}" if np.isfinite(rmsep) else "—")
 
-# ===================== SAYFA 4: Arıza / Anomali Tespiti (sabit parametreler + şık metrikler) =====================
+# ===================== SAYFA 4: Arıza / Anomali Tespiti =====================
 elif selected == "Arıza ve Anomali Tespiti":
     st.subheader("🚨 Arıza & Anomali Tespiti")
 
-    # ---- Sabitler (kullanıcıdan sormuyoruz) ----
+    # ---- Sabitler ----
     AGG_MODE = "mean"     # Günlük Ortalama
     CONTAM   = 0.03       # Anomali oranı
     HOLDOUT  = 30         # Test penceresi (gün)
