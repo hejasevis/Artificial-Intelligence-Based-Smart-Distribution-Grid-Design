@@ -182,8 +182,8 @@ if selected == "Talep Verisi Girişi":
                       tooltip=f"Trafo: {r['Montaj Yeri']}",
                       icon=folium.Icon(color="orange", icon="bolt", prefix="fa")).add_to(trafos_group)
 
-    poles_group.add_to(m); trafos_group.add_to(m)
-    folium.LayerControl(collapsed=False).add_to(m)
+    poles_group.add_to(m)
+    trafos_group.add_to(m)
     m.add_child(folium.LatLngPopup())
     map_data = st_folium(m, height=620, width="100%", returned_objects=["last_clicked"], key="select_map_basic")
 
@@ -311,7 +311,7 @@ if selected == "Talep Verisi Girişi":
     if (best_kva is not None) and (best_kva > 400):
         st.warning("ℹ️ Mevcut trafo gücü 400 kVA üzerinde — **ek trafo gerekebilir**.")
 
-    # Durum kartı (sayfa içi hesap)
+    # Durum kartı
     durum_val = dv_val <= drop_threshold_pct
     bg = "#0ea65d" if durum_val else "#ef4444"
     txt = "Eşik altında — Tasarım uygun." if durum_val else "Eşik üstünde — İyileştirme gerek."
@@ -322,6 +322,7 @@ if selected == "Talep Verisi Girişi":
 
     st.subheader("📡 Oluşturulan Şebeke Hattı")
     st_folium(m2, height=620, width="100%", key="result_map_basic")
+
 
 # ===================== SAYFA 2: Gerilim Düşümü — Gerçek Veri & AI =====================
 elif selected == "Gerilim Düşümü Analizi":
